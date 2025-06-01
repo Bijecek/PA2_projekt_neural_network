@@ -40,8 +40,8 @@ __device__ float convert_sigmoid(float sum) {
 	return 1.0f / (1.0f + expf(-sum));
 }
 
-// Dopředný průchod
-__global__ void forward(float* input_data, int input_size, float* weight_matrix, float* bias, float* output_data, int output_size, bool compute_relu) {
+// Dopředný průchod - přes samply
+__global__ void forward_old(float* input_data, int input_size, float* weight_matrix, float* bias, float* output_data, int output_size, bool compute_relu) {
 	int idx = blockIdx.x * blockDim.x + threadIdx.x;
 	if (idx < num_samples) {
 
@@ -62,6 +62,30 @@ __global__ void forward(float* input_data, int input_size, float* weight_matrix,
 				output_data[idx * output_size + j] = convert_sigmoid(sum);
 			}
 		}
+	}
+}
+// Jedno vlákno = jeden sample - jeden neuron
+__global__ void forward(const float* __restrict__ input_data, int input_size, const float* __restrict__ weight_matrix, const float* __restrict__ bias, float* __restrict__ output_data, int output_size, bool compute_relu) {
+	int sample_id = blockIdx.x * blockDim.x + threadIdx.x;
+	int neuron_id = blockIdx.y * blockDim.y + threadIdx.y;
+
+	if (sample_id < num_samples && neuron_id < output_size) {
+		float sum = 0.0;
+
+		for (int i = 0; i < input_size; i++) {
+			sum += input_data[sample_id * input_size + i] * weight_matrix[neuron_id * input_size + i];
+		}
+
+		// Přidej bias (input 0,0 -> target 0 by jinak nefungovalo)
+		sum += bias[neuron_id];
+
+		if (compute_relu) {
+			output_data[sample_id * output_size + neuron_id] = convert_relu(sum);
+		}
+		else {
+			output_data[sample_id * output_size + neuron_id] = convert_sigmoid(sum);
+		}
+		
 	}
 }
 
@@ -184,9 +208,9 @@ int main(int argc, char* argv[])
 	// Hyperparametry
 	const int hidden_size = 20;
 	// Počet hidden layers
-	const int num_hidden = 0;
+	const int num_hidden = 1;
 	// Počet iterací tréninku
-	const int n_of_iterations = 100;
+	const int n_of_iterations = 50;
 	// TODO: learning rate jako konstant memory
 	//const float lr = 0.01f;
 
@@ -289,8 +313,12 @@ int main(int argc, char* argv[])
 
 	float* h_gradient = new float[gradient_size];
 
-	dim3 dimBlock{ THREADS_PER_BLOCK,1,1 };
-	dim3 dimGrid{ 1,1,1 };
+	const int x_tread_count = 16;
+	const int y_tread_count = 16;
+	//dim3 dimGrid{ 2, 2 ,1 };
+	dim3 dimBlock{ 128,1,1 };
+	dim3 dimGrid{ 1,1 ,1 };
+
 
 
 	// Hlavní trénovací smyčka
@@ -299,30 +327,46 @@ int main(int argc, char* argv[])
 		// Resetovani loss
 		checkCudaErrors(cudaMemset(d_calculated_loss, 0, sizeof(float)));
 
-
 		// Forward fáze
 		float* current_input = d_input;
 		for (int i = 0; i < layers.size(); i++) {
 			Layer& current_layer = layers[i];
 
-			// LOGOVANI
-			//checkDeviceMatrix<float>(current_layer.activations, input_size * current_layer.out * sizeof(float), 1, input_size * current_layer.out, "%f ", "Before: ");
+			{
+				// Nastavení rozměrů kernelu - dynamicky ho upravujeme podle rozměrů <input_size; layers[i].out>
+				dim3 dimBlock{ x_tread_count, y_tread_count ,1 };
+				
+				// (4 + 16 - 1) / 16
+				// (20 + 16 - 1) / 16
+				unsigned int x_grid_dim = (input_size+x_tread_count - 1) / x_tread_count;
+				unsigned int y_grid_dim = (layers[i].out + y_tread_count - 1) / y_tread_count;
 
-			// Pokud se jedná o poslední vrstvu -> nepočítáme RELU ale SIGMOID
-			if (i == layers.size() - 1) {
-				forward << <dimGrid, dimBlock >> > (current_input, current_layer.in, current_layer.weights, current_layer.biases,
-					current_layer.activations, current_layer.out, false);
-			}
-			else {
-				forward << <dimGrid, dimBlock >> > (current_input, current_layer.in, current_layer.weights, current_layer.biases,
-					current_layer.activations, current_layer.out, true);
+				dim3 dimGrid{
+					x_grid_dim,
+					y_grid_dim,
+					1
+				};
+				cout << "Kernel executed with: " << x_grid_dim << " " << y_grid_dim << endl;
+
+				// LOGOVANI
+				checkDeviceMatrix<float>(current_layer.activations, input_size * current_layer.out * sizeof(float), 1, input_size * current_layer.out, "%f ", "Before: ");
+
+				// Pokud se jedná o poslední vrstvu -> nepočítáme RELU ale SIGMOID
+				if (i == layers.size() - 1) {
+					forward << <dimGrid, dimBlock >> > (current_input, current_layer.in, current_layer.weights, current_layer.biases,
+						current_layer.activations, current_layer.out, false);
+				}
+				else {
+					forward << <dimGrid, dimBlock >> > (current_input, current_layer.in, current_layer.weights, current_layer.biases,
+						current_layer.activations, current_layer.out, true);
+				}
 			}
 
 			// Změnit vstup
 			current_input = current_layer.activations;
 
 			// LOGOVANI
-			//checkDeviceMatrix<float>(current_layer.activations, input_size *  current_layer.out * sizeof(float), 1, input_size *  current_layer.out, "%f ", "After: ");
+			checkDeviceMatrix<float>(current_layer.activations, input_size *  current_layer.out * sizeof(float), 1, input_size *  current_layer.out, "%f ", "After: ");
 		}
 
 		// LOGOVANI - vypis výstupu poslední vrstvy pro všechny vstupy
