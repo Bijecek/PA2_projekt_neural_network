@@ -40,30 +40,6 @@ __device__ float convert_sigmoid(float sum) {
 	return 1.0f / (1.0f + expf(-sum));
 }
 
-// Dopředný průchod - přes samply
-__global__ void forward_old(float* input_data, int input_size, float* weight_matrix, float* bias, float* output_data, int output_size, bool compute_relu) {
-	int idx = blockIdx.x * blockDim.x + threadIdx.x;
-	if (idx < num_samples) {
-
-		for (int j = 0; j < output_size; j++) {
-			float sum = 0.0;
-
-			for (int i = 0; i < input_size; i++) {
-				sum += input_data[idx * input_size + i] * weight_matrix[j * input_size + i];
-			}
-
-			// Přidej bias (input 0,0 -> target 0 by jinak nefungovalo)
-			sum += bias[j];
-			
-			if (compute_relu) {
-				output_data[idx * output_size + j] = convert_relu(sum);
-			}
-			else {
-				output_data[idx * output_size + j] = convert_sigmoid(sum);
-			}
-		}
-	}
-}
 // Jedno vlákno = jeden sample - jeden neuron
 __global__ void forward(const float* __restrict__ input_data, int input_size, const float* __restrict__ weight_matrix, const float* __restrict__ bias, float* __restrict__ output_data, int output_size, bool compute_relu) {
 	int sample_id = blockIdx.x * blockDim.x + threadIdx.x;
@@ -91,7 +67,7 @@ __global__ void forward(const float* __restrict__ input_data, int input_size, co
 
 //256 velikost -> pracuju s 128 THREADS_PER_BLOCK
 __global__ void compute_loss(float* y_predicted, float* y_true, float* loss, int size) {
-	__shared__ float s_loss[THREADS_PER_BLOCK*2];
+	__shared__ float s_loss[THREADS_PER_BLOCK];
 	
 	int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -103,6 +79,10 @@ __global__ void compute_loss(float* y_predicted, float* y_true, float* loss, int
 	if (idx < size) {
 		s_loss[idx] = -y_true[idx] * logf(fmax(y_predicted[idx], epsilon));
 		__syncthreads();
+
+		if (idx + next > size) {
+			return;
+		}
 
 		while (next > 0) {
 			s_loss[idx] += s_loss[idx + next];
@@ -141,54 +121,52 @@ __device__ float derivate_sigmoid(float sum) {
 
 __global__ void backward(float* input, float* activations, int input_size, float* weight_matrix, bool first, float* gradient_in
 	, float* gradient_out, int output_size, int next_out_size) {
-	int idx = blockIdx.x * blockDim.x + threadIdx.x;
+	
+	int sample_id = blockIdx.x * blockDim.x + threadIdx.x;
+	int neuron_id = blockIdx.y * blockDim.y + threadIdx.y;
 
-	if (idx < num_samples) {
+	if (sample_id < num_samples && neuron_id < output_size) {
 
 		if (first) {
-			for (int i = 0; i < output_size; i++) {
-				gradient_out[idx * output_size + i] = input[idx * output_size + i] * derivate_sigmoid(activations[idx * output_size + i]);
-			}
+			gradient_out[sample_id * output_size + neuron_id] = input[sample_id * output_size + neuron_id] * derivate_sigmoid(activations[sample_id * output_size + neuron_id]);
 		}
 		else {
-			for (int i = 0; i < output_size; i++) {
-				float sum = 0.0;
-				for (int j = 0; j < next_out_size; j++) {
-					sum += weight_matrix[j * output_size + i] * gradient_in[idx * next_out_size + j];
-				}
-
-
-				gradient_out[idx * output_size + i] = sum * derivate_relu(activations[idx * output_size + i]);
+			
+			float sum = 0.0;
+			for (int j = 0; j < next_out_size; j++) {
+				sum += weight_matrix[j * output_size + neuron_id] * gradient_in[sample_id * next_out_size + j];
 			}
+
+			gradient_out[sample_id * output_size + neuron_id] = sum * derivate_relu(activations[sample_id * output_size + neuron_id]);
+			
 		}
 	}
-
-	
-
 }
 // Funkce pro aktualizaci vah a biasu
+// TODO:
+//      Přepočítat si změnu váhy pro N vzorků a až potom volat tuhle funkci
 __global__ void update_parameters(float* input, float* gradient, float* weight_matrix, float* biases, int input_size, int output_size) {
-	int idx = blockIdx.x * blockDim.x + threadIdx.x;
+	int sample_id = blockIdx.x * blockDim.x + threadIdx.x;
+	int neuron_id = blockIdx.y * blockDim.y + threadIdx.y;
 
-	if (idx < num_samples) {
+	if (sample_id < num_samples) {
 		// Learning rate
 		float learning_rate = 0.1f;
 
-		// For each output neuron
-		for (int j = 0; j < output_size; j++) {
-			// Get the gradient for the current sample and output neuron
-			float grad = gradient[idx * output_size + j];
+		
+		// Get the gradient for the current sample and output neuron
+		float grad = gradient[sample_id * output_size + neuron_id];
 
-			// Update each weight for this output neuron
-			for (int i = 0; i < input_size; i++) {
-				// weight_matrix is [output_size][input_size]
-				atomicAdd(&weight_matrix[j * input_size + i], -learning_rate * input[idx * input_size + i] * grad);
-				//atomicAdd(&weight_matrix[j * input_size + i], 0.1);
-			}
+		// Update each weight for this output neuron
+		for (int i = 0; i < input_size; i++) {
+			// weight_matrix is [output_size][input_size]
+			atomicAdd(&weight_matrix[neuron_id * input_size + i], -learning_rate * input[sample_id * input_size + i] * grad);
 
-			// Update bias
-			atomicAdd(&biases[j], -learning_rate * grad);
 		}
+
+		// Update bias
+		atomicAdd(&biases[neuron_id], -learning_rate * grad);
+		
 	}
 }
 
@@ -232,21 +210,6 @@ int main(int argc, char* argv[])
 	// HiddenN -> Výstupní
 	layers.push_back({ hidden_size, output_dimension, nullptr, nullptr, nullptr, nullptr });
 
-	// Výstupní -> Konec
-	//layers.push_back({ output_dimension, 0, nullptr, nullptr, nullptr, nullptr });
-
-	// Buffery pro vstupní data + XOR data
-	/*
-	float* h_input = new float[input_size * input_dimension] 
-		{
-			0, 0, 0, 1, 1, 0, 1, 1
-		};
-	float* h_target = new float[output_size * output_dimension] 
-		{
-			0, 1, 1, 0
-		};
-	*/
-
 	float* h_input = new float[input_size * input_dimension]
 		{
 			0, 0, 1, 1, 0, 1, 1, 0
@@ -255,7 +218,6 @@ int main(int argc, char* argv[])
 		{
 			0, 0, 1, 1
 		};
-
 
 
 	// Alokace vrstev
@@ -274,7 +236,7 @@ int main(int argc, char* argv[])
 		std::vector<float> temporary_weights(layer.in * layer.out), temporary_biases(layer.out);
 
 		for (auto& v : temporary_weights) v = dist(gen);
-		for (auto& v : temporary_biases) v = 0.1;//dist(gen);
+		for (auto& v : temporary_biases) v = dist(gen);
 
 		checkCudaErrors(cudaMemcpy(layer.weights, temporary_weights.data(), layer.in * layer.out * sizeof(float), cudaMemcpyHostToDevice));
 		checkCudaErrors(cudaMemcpy(layer.biases, temporary_biases.data(), layer.out * sizeof(float), cudaMemcpyHostToDevice));
@@ -297,11 +259,6 @@ int main(int argc, char* argv[])
 	checkCudaErrors(cudaMalloc(&d_calculated_loss, sizeof(float)));
 
 
-	
-	//int h_num_samples = input_size;
-	//int d_num_samples;
-	//checkCudaErrors(cudaMalloc(&d_num_samples, sizeof(int)));
-	//checkCudaErrors(cudaMemcpy(&d_num_samples, &h_num_samples, sizeof(int), cudaMemcpyHostToDevice));
 	checkCudaErrors(cudaMemcpyToSymbol((const void*)&num_samples, &input_size, sizeof(int)));
 
 
@@ -313,10 +270,11 @@ int main(int argc, char* argv[])
 
 	float* h_gradient = new float[gradient_size];
 
-	const int x_tread_count = 16;
-	const int y_tread_count = 16;
-	//dim3 dimGrid{ 2, 2 ,1 };
-	dim3 dimBlock{ 128,1,1 };
+	const int x_thread_count = 16;
+	const int y_thread_count = 16;
+	
+
+	dim3 dimBlock{ x_thread_count, y_thread_count ,1 };
 	dim3 dimGrid{ 1,1 ,1 };
 
 
@@ -332,35 +290,33 @@ int main(int argc, char* argv[])
 		for (int i = 0; i < layers.size(); i++) {
 			Layer& current_layer = layers[i];
 
-			{
-				// Nastavení rozměrů kernelu - dynamicky ho upravujeme podle rozměrů <input_size; layers[i].out>
-				dim3 dimBlock{ x_tread_count, y_tread_count ,1 };
+			
+			// Nastavení rozměrů gridu - dynamicky ho upravujeme podle rozměrů <input_size; layers[i].out>
+		
+			// (4 + 16 - 1) / 16
+			unsigned int x_grid_dim = (input_size + x_thread_count - 1) / x_thread_count;
+			// (20 + 16 - 1) / 16
+			unsigned int y_grid_dim = (layers[i].out + y_thread_count - 1) / y_thread_count;
+
+			dimGrid.x = x_grid_dim;
+			dimGrid.y = y_grid_dim;
+			dimGrid.z = 1;
 				
-				// (4 + 16 - 1) / 16
-				// (20 + 16 - 1) / 16
-				unsigned int x_grid_dim = (input_size+x_tread_count - 1) / x_tread_count;
-				unsigned int y_grid_dim = (layers[i].out + y_tread_count - 1) / y_tread_count;
+			cout << "Forward kernel executed with: " << x_grid_dim << " " << y_grid_dim << endl;
 
-				dim3 dimGrid{
-					x_grid_dim,
-					y_grid_dim,
-					1
-				};
-				cout << "Kernel executed with: " << x_grid_dim << " " << y_grid_dim << endl;
+			// LOGOVANI
+			checkDeviceMatrix<float>(current_layer.activations, input_size * current_layer.out * sizeof(float), 1, input_size * current_layer.out, "%f ", "Before: ");
 
-				// LOGOVANI
-				checkDeviceMatrix<float>(current_layer.activations, input_size * current_layer.out * sizeof(float), 1, input_size * current_layer.out, "%f ", "Before: ");
-
-				// Pokud se jedná o poslední vrstvu -> nepočítáme RELU ale SIGMOID
-				if (i == layers.size() - 1) {
-					forward << <dimGrid, dimBlock >> > (current_input, current_layer.in, current_layer.weights, current_layer.biases,
-						current_layer.activations, current_layer.out, false);
-				}
-				else {
-					forward << <dimGrid, dimBlock >> > (current_input, current_layer.in, current_layer.weights, current_layer.biases,
-						current_layer.activations, current_layer.out, true);
-				}
+			// Pokud se jedná o poslední vrstvu -> nepočítáme RELU ale SIGMOID
+			if (i == layers.size() - 1) {
+				forward << <dimGrid, dimBlock >> > (current_input, current_layer.in, current_layer.weights, current_layer.biases,
+					current_layer.activations, current_layer.out, false);
 			}
+			else {
+				forward << <dimGrid, dimBlock >> > (current_input, current_layer.in, current_layer.weights, current_layer.biases,
+					current_layer.activations, current_layer.out, true);
+			}
+			
 
 			// Změnit vstup
 			current_input = current_layer.activations;
@@ -374,7 +330,18 @@ int main(int argc, char* argv[])
 
 		std::cout << "Forward ok" << std::endl;
 
-		// Počítání loss -- jako vstup je output z předposlední do poslední vrstvy (proto size() - 2)
+		// TODO Nastavit dle batch_size -- momentálně je to na 128
+		// S timto pocitame LOSS a GRADIENTy
+		dimBlock.x = 128;
+		dimBlock.y = 1;
+		dimBlock.z = 1;
+
+		dimGrid.x = 1;
+		dimGrid.y = 1;
+		dimGrid.z = 1;
+
+
+		// Počítání loss -- jako vstup je output z předposlední do poslední vrstvy (proto size() - 1)
 		compute_loss << <dimGrid, dimBlock >> > (layers[layers.size() - 1].activations, d_target, d_calculated_loss, gradient_size);
 
 		// Přesun loss pole zpátky na host 
@@ -392,12 +359,16 @@ int main(int argc, char* argv[])
 
 		compute_gradient << <dimGrid, dimBlock >> > (layers[layers.size() - 1].activations, d_target, d_gradient, gradient_size);
 		// LOGOVANI
-		//checkDeviceMatrix<float>(d_gradient, gradient_size * sizeof(float), 1, gradient_size, "%f ", "Gradient: ");
+		checkDeviceMatrix<float>(d_gradient, gradient_size * sizeof(float), 1, gradient_size, "%f ", "Gradient: ");
 
 
 		// Copy to GPU
 		//checkCudaErrors(cudaMemcpy(d_gradient, h_gradient, gradient_size * sizeof(float), cudaMemcpyHostToDevice));
 
+		// Nastav původní velikosti bloku pro 2D
+		dimBlock.x = 16;
+		dimBlock.y = 16;
+		dimBlock.z = 1;
 
 		// Backward fáze
 		for (int i = layers.size() - 1; i >= 0; i--) {
@@ -409,26 +380,41 @@ int main(int argc, char* argv[])
 			bool first = (i == layers.size() - 1) ? true : false;
 			float* gradient_in = (i == layers.size() - 1) ? nullptr : layers[i+1].gradients;
 			float* gradient_out = layers[i].gradients;
+
 			
+			// (4 + 16 - 1) / 16
+			// (20 + 16 - 1) / 16
+			unsigned int x_grid_dim = (input_size + x_thread_count - 1) / x_thread_count;
+			unsigned int y_grid_dim = (layers[i].out + y_thread_count - 1) / y_thread_count;
+
+			dimGrid.x = x_grid_dim;
+			dimGrid.y = y_grid_dim;
+			dimGrid.z = 1;
+
+
+			cout << "Backward kernel executed with: " << x_grid_dim << " " << y_grid_dim << endl;
+
 			if (i == layers.size() - 1) {
 				backward << <dimGrid, dimBlock >> > (input, activation, in_size, weight_matrix, first, gradient_in, gradient_out, out_size, 0);
 			}
 			else {
-				backward << <dimGrid, dimBlock >> > (input, activation, in_size, weight_matrix, first, gradient_in, gradient_out, out_size, layers[i+1].out);
+				backward << <dimGrid, dimBlock >> > (input, activation, in_size, weight_matrix, first, gradient_in, gradient_out, out_size, layers[i + 1].out);
 			}
+
+
 
 			// LOGOVANI
 			//checkDeviceMatrix<float>(layers[i].gradients, input_size * layers[i].out * sizeof(float), 1, input_size * layers[i].out, "%f ", "Gradient calc: ");
 
 			//TODO AKTUALIZACE VAH -- kernel update_parameters
-			
-			
-			float* input_activations = (i == 0) ? d_input : layers[i-1].activations;
+
+
+			float* input_activations = (i == 0) ? d_input : layers[i - 1].activations;
 			//int prev_layer_size = (i == 0) ? input_size : layers[i - 1].out;
 
 			update_parameters << <dimGrid, dimBlock >> > (input_activations, layers[i].gradients, layers[i].weights
 				, layers[i].biases, layers[i].in, layers[i].out);
-			
+
 
 		}
 		for (int i = 0; i < layers.size(); i++) {
