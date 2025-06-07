@@ -14,7 +14,7 @@ void setNumSamplesConstant(int input_size) {
 }
 
 // Jedno vlákno = jeden sample - jeden neuron
-__global__ void forward(const float* __restrict__ input_data, int input_size, const float* __restrict__ weight_matrix, const float* __restrict__ bias, float* __restrict__ output_data, int output_size, bool compute_relu) {
+__global__ void forward(const float* __restrict__ input_data, int input_size, const float* __restrict__ weight_matrix, const float* __restrict__ bias, float* __restrict__ output_data, int output_size, int activation_type) {
 	int sample_id = blockIdx.x * blockDim.x + threadIdx.x;
 	int neuron_id = blockIdx.y * blockDim.y + threadIdx.y;
 
@@ -28,12 +28,7 @@ __global__ void forward(const float* __restrict__ input_data, int input_size, co
 		// Pøidej bias (input 0,0 -> target 0 by jinak nefungovalo)
 		sum += bias[neuron_id];
 
-		if (compute_relu) {
-			output_data[sample_id * output_size + neuron_id] = convert_relu(sum);
-		}
-		else {
-			output_data[sample_id * output_size + neuron_id] = convert_sigmoid(sum);
-		}
+		output_data[sample_id * output_size + neuron_id] = activation_functions[activation_type](sum);
 
 	}
 }
@@ -82,7 +77,7 @@ __global__ void compute_gradient(float* y_pred, float* y_true, float* gradient, 
 	}
 }
 __global__ void backward(float* input, float* activations, int input_size, float* weight_matrix, bool first, float* gradient_in
-	, float* gradient_out, int output_size, int next_out_size) {
+	, float* gradient_out, int output_size, int next_out_size, int activation_type) {
 
 	int sample_id = blockIdx.x * blockDim.x + threadIdx.x;
 	int neuron_id = blockIdx.y * blockDim.y + threadIdx.y;
@@ -90,7 +85,7 @@ __global__ void backward(float* input, float* activations, int input_size, float
 	if (sample_id < num_samples && neuron_id < output_size) {
 
 		if (first) {
-			gradient_out[sample_id * output_size + neuron_id] = input[sample_id * output_size + neuron_id] * derivate_sigmoid(activations[sample_id * output_size + neuron_id]);
+			gradient_out[sample_id * output_size + neuron_id] = input[sample_id * output_size + neuron_id] * derivate_activation_functions[activation_type](activations[sample_id * output_size + neuron_id]);
 		}
 		else {
 
@@ -99,7 +94,7 @@ __global__ void backward(float* input, float* activations, int input_size, float
 				sum += weight_matrix[j * output_size + neuron_id] * gradient_in[sample_id * next_out_size + j];
 			}
 
-			gradient_out[sample_id * output_size + neuron_id] = sum * derivate_relu(activations[sample_id * output_size + neuron_id]);
+			gradient_out[sample_id * output_size + neuron_id] = sum * derivate_activation_functions[activation_type](activations[sample_id * output_size + neuron_id]);
 
 		}
 	}

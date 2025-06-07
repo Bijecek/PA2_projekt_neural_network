@@ -139,15 +139,8 @@ int main(int argc, char* argv[])
 			// LOGOVANI
 			checkDeviceMatrix<float>(current_layer.activations, input_size * current_layer.out * sizeof(float), 1, input_size * current_layer.out, "%f ", "Before: ");
 
-			// Pokud se jedná o poslední vrstvu -> nepočítáme RELU ale SIGMOID
-			if (i == layers.size() - 1) {
-				forward << <dimGrid, dimBlock >> > (current_input, current_layer.in, current_layer.weights, current_layer.biases,
-					current_layer.activations, current_layer.out, false);
-			}
-			else {
-				forward << <dimGrid, dimBlock >> > (current_input, current_layer.in, current_layer.weights, current_layer.biases,
-					current_layer.activations, current_layer.out, true);
-			}
+			forward << <dimGrid, dimBlock >> > (current_input, current_layer.in, current_layer.weights, current_layer.biases,
+				current_layer.activations, current_layer.out, static_cast<int>(current_layer.activation));
 			
 
 			// Změnit vstup
@@ -226,12 +219,16 @@ int main(int argc, char* argv[])
 
 			cout << "Backward kernel executed with: " << x_grid_dim << " " << y_grid_dim << endl;
 
+			
 			if (i == layers.size() - 1) {
-				backward << <dimGrid, dimBlock >> > (input, activation, in_size, weight_matrix, first, gradient_in, gradient_out, out_size, 0);
+				backward << <dimGrid, dimBlock >> > (input, activation, in_size, weight_matrix, first, gradient_in, gradient_out,
+					out_size, 0, static_cast<int>(layers[i].activation));
 			}
 			else {
-				backward << <dimGrid, dimBlock >> > (input, activation, in_size, weight_matrix, first, gradient_in, gradient_out, out_size, layers[i + 1].out);
+				backward << <dimGrid, dimBlock >> > (input, activation, in_size, weight_matrix, first, gradient_in, gradient_out,
+					out_size, layers[i + 1].out, static_cast<int>(layers[i].activation));
 			}
+			
 
 
 
