@@ -11,6 +11,7 @@
     </ProjectConfiguration>
   </ItemGroup>
   <ItemGroup>
+    <CudaCompile Include="src\Datasets.cu" />
     <CudaCompile Include="src\Layer.cu" />
     <CudaCompile Include="src\NeuralNetwork.cu" />
     <CudaCompile Include="src\Runner.cu" />

@@ -4,9 +4,6 @@
 #include <iostream>
 
 #include "NeuralNetwork.cuh"
-#include "Layer.cuh"
-#include "ActivationFunctions.cuh"
-#include "Datasets.cuh"
 
 using std::cout;
 using std::endl;
@@ -17,84 +14,43 @@ cudaError_t error = cudaSuccess;
 cudaDeviceProp deviceProp = cudaDeviceProp();
 
 
-int main(int argc, char* argv[])
-{
-	initializeCUDA(deviceProp);
+void allocate_input_data(TrainingContext& tc) {
+	checkCudaErrors(cudaMalloc(&tc.d_input, tc.input_size * tc.input_dim * sizeof(float)));
+	checkCudaErrors(cudaMemcpy(tc.d_input, tc.dataset.input.data(), tc.input_size * tc.input_dim * sizeof(float), cudaMemcpyHostToDevice));
 
-	// Parametry vstupních dat
-	//const int input_size = 4;
-	const int input_size = 4;
-	const int input_dimension = 2;
-	//const int output_size = 4;
-	const int output_size = 4;
-	const int output_dimension = 1;
+	checkCudaErrors(cudaMalloc(&tc.d_target, tc.output_size * tc.output_dim * sizeof(float)));
+	checkCudaErrors(cudaMemcpy(tc.d_target, tc.dataset.target.data(), tc.output_size * tc.output_dim * sizeof(float), cudaMemcpyHostToDevice));
+}
 
-	// Hyperparametry
-	const int hidden_size = 20;
-	// Počet hidden layers
-	const int num_hidden = 1;
-	// Počet iterací tréninku
-	const int n_of_iterations = 50;
-
-
-
-//******************************************************************************************|
-//								    INPUT DATASETS										    |						
-//******************************************************************************************|
-
-	Dataset ds = getDatasetByName("dataset1");
-
-	const std::vector<float> X = ds.input;
-	const std::vector<float> y = ds.target;
-
-
-//******************************************************************************************|
-//							   INPUT DATA ALLOCATION ON GPU									|						
-//******************************************************************************************|
-
-	float* d_input;
-	checkCudaErrors(cudaMalloc(&d_input, input_size * input_dimension * sizeof(float)));
-	checkCudaErrors(cudaMemcpy(d_input, X.data(), input_size * input_dimension * sizeof(float), cudaMemcpyHostToDevice));
-
-	float* d_target;
-	checkCudaErrors(cudaMalloc(&d_target, output_size * output_dimension * sizeof(float)));
-	checkCudaErrors(cudaMemcpy(d_target, y.data(), output_size * output_dimension * sizeof(float), cudaMemcpyHostToDevice));
-
-
-//******************************************************************************************|
-//								      CREATE LAYERS											|						
-//******************************************************************************************|
-
-	std::vector<Layer> layers;
-
+// TODO CUSTOM NETWORK
+void create_network(TrainingContext& tc) {
 	// Vstupní -> Hidden1
-	layers.push_back(createDenseLayer(input_dimension, hidden_size, ActivationFunction::RELU));
+	tc.layers.push_back(createDenseLayer(tc.input_dim, tc.hidden_size, ActivationFunction::RELU));
 
 	// Hidden1 -> HiddenN
-	for (int i = 0; i < num_hidden; i++) {
-		layers.push_back(createDenseLayer(hidden_size, hidden_size, ActivationFunction::RELU));
+	for (int i = 0; i < tc.num_hidden; i++) {
+		tc.layers.push_back(createDenseLayer(tc.hidden_size, tc.hidden_size, ActivationFunction::RELU));
 	}
 
 	// HiddenN -> Výstupní
-	layers.push_back(createDenseLayer(hidden_size, output_dimension, ActivationFunction::SIGMOID));
+	tc.layers.push_back(createDenseLayer(tc.hidden_size, tc.output_dim, ActivationFunction::SIGMOID));
 
-//******************************************************************************************|
-//								  LAYERS ALLOCATION ON GPU								    |					
-//******************************************************************************************|
-	
-	for (auto &layer : layers) {
-		initLayer(layer, input_size);
+	// GPU ALOKACE
+	for (auto& layer : tc.layers) {
+		initLayer(layer, tc.input_size);
 	}
+}
 
+void train(TrainingContext& tc) {
 	float* d_calculated_loss;
 	checkCudaErrors(cudaMalloc(&d_calculated_loss, sizeof(float)));
 
 
-	setNumSamplesConstant(input_size);
+	setNumSamplesConstant(tc.input_size);
 
 
 	// Definice loss pole
-	const int gradient_size = output_size * output_dimension;
+	const int gradient_size = tc.output_size * tc.output_dim;
 
 	float* d_gradient;
 	checkCudaErrors(cudaMalloc(&d_gradient, gradient_size * sizeof(float)));
@@ -103,160 +59,65 @@ int main(int argc, char* argv[])
 
 	const int x_thread_count = 16;
 	const int y_thread_count = 16;
-	
+
 
 	dim3 dimBlock{ x_thread_count, y_thread_count ,1 };
 	dim3 dimGrid{ 1,1 ,1 };
 
+	checkCudaErrors(cudaMalloc(&tc.d_loss, sizeof(float)));
+	checkCudaErrors(cudaMalloc(&tc.d_gradient, gradient_size * sizeof(float)));
 
-//******************************************************************************************|
-//								         MAIN TRAINING LOOP						            |					
-//******************************************************************************************|
-	for (int iteration = 0; iteration < n_of_iterations; iteration++) {
+
+	//******************************************************************************************|
+	//								         MAIN TRAINING LOOP						            |					
+	//******************************************************************************************|
+	for (int iteration = 0; iteration < tc.n_of_iterations; iteration++) {
 
 		// Resetovani loss
 		checkCudaErrors(cudaMemset(d_calculated_loss, 0, sizeof(float)));
 
 		// Forward fáze
-		float* current_input = d_input;
-		for (int i = 0; i < layers.size(); i++) {
-			Layer& current_layer = layers[i];
+		forward_phase(tc);
 
-			
-			// Nastavení rozměrů gridu - dynamicky ho upravujeme podle rozměrů <input_size; layers[i].out>
-		
-			// (4 + 16 - 1) / 16
-			unsigned int x_grid_dim = (input_size + x_thread_count - 1) / x_thread_count;
-			// (20 + 16 - 1) / 16
-			unsigned int y_grid_dim = (layers[i].out + y_thread_count - 1) / y_thread_count;
-
-			dimGrid.x = x_grid_dim;
-			dimGrid.y = y_grid_dim;
-			dimGrid.z = 1;
-				
-			cout << "Forward kernel executed with: " << x_grid_dim << " " << y_grid_dim << endl;
-
-			// LOGOVANI
-			checkDeviceMatrix<float>(current_layer.activations, input_size * current_layer.out * sizeof(float), 1, input_size * current_layer.out, "%f ", "Before: ");
-
-			forward << <dimGrid, dimBlock >> > (current_input, current_layer.in, current_layer.weights, current_layer.biases,
-				current_layer.activations, current_layer.out, static_cast<int>(current_layer.activation));
-			
-
-			// Změnit vstup
-			current_input = current_layer.activations;
-
-			// LOGOVANI
-			checkDeviceMatrix<float>(current_layer.activations, input_size *  current_layer.out * sizeof(float), 1, input_size *  current_layer.out, "%f ", "After: ");
-		}
-
-		// LOGOVANI - vypis výstupu poslední vrstvy pro všechny vstupy
-		checkDeviceMatrix<float>(layers[layers.size() - 1].activations, input_size* layers[layers.size() - 1].out * sizeof(float), 1, input_size* layers[layers.size() - 1].out, "%f ", "Activations: ");
-
-		std::cout << "Forward ok" << std::endl;
-
-		// TODO Nastavit dle batch_size -- momentálně je to na 128
-		// S timto pocitame LOSS a GRADIENTy
-		dimBlock.x = 128;
-		dimBlock.y = 1;
-		dimBlock.z = 1;
-
-		dimGrid.x = 1;
-		dimGrid.y = 1;
-		dimGrid.z = 1;
-
-
-		// Počítání loss -- jako vstup je output z předposlední do poslední vrstvy (proto size() - 1)
-		compute_loss << <dimGrid, dimBlock >> > (layers[layers.size() - 1].activations, d_target, d_calculated_loss, gradient_size);
-
-		// Přesun loss pole zpátky na host 
-		// Mozna zbytecne
-		//checkCudaErrors(cudaMemcpy(h_output_loss, d_output_loss, compute_loss_size * sizeof(float), cudaMemcpyDeviceToHost));
-		float* tmp_loss = new float[1];
-		checkCudaErrors(cudaMemcpy(tmp_loss, d_calculated_loss, sizeof(float), cudaMemcpyDeviceToHost));
-
-		// VYPSANI CELKOVE categorical crossentropy LOSS
-		cout << "Iteration: " << iteration << " -- loss: " << tmp_loss[0] << std::endl;
-
-
-		std::cout << "Loss ok" << std::endl;
-
-
-		compute_gradient << <dimGrid, dimBlock >> > (layers[layers.size() - 1].activations, d_target, d_gradient, gradient_size);
-		// LOGOVANI
-		checkDeviceMatrix<float>(d_gradient, gradient_size * sizeof(float), 1, gradient_size, "%f ", "Gradient: ");
-
-
-		// Copy to GPU
-		//checkCudaErrors(cudaMemcpy(d_gradient, h_gradient, gradient_size * sizeof(float), cudaMemcpyHostToDevice));
-
-		// Nastav původní velikosti bloku pro 2D
-		dimBlock.x = 16;
-		dimBlock.y = 16;
-		dimBlock.z = 1;
+		// LOSS A GRADIENT FAZE
+		loss_and_gradient_phase(tc, iteration);
 
 		// Backward fáze
-		for (int i = layers.size() - 1; i >= 0; i--) {
-			float* input = (i == layers.size() - 1 ? d_gradient : layers[i].gradients);
-			float* activation = layers[i].activations;
-			int in_size = layers[i].in;
-			int out_size = layers[i].out;
-			float* weight_matrix = (i == layers.size() - 1) ? nullptr : layers[i+1].weights;
-			bool first = (i == layers.size() - 1) ? true : false;
-			float* gradient_in = (i == layers.size() - 1) ? nullptr : layers[i+1].gradients;
-			float* gradient_out = layers[i].gradients;
-
-			
-			// (4 + 16 - 1) / 16
-			// (20 + 16 - 1) / 16
-			unsigned int x_grid_dim = (input_size + x_thread_count - 1) / x_thread_count;
-			unsigned int y_grid_dim = (layers[i].out + y_thread_count - 1) / y_thread_count;
-
-			dimGrid.x = x_grid_dim;
-			dimGrid.y = y_grid_dim;
-			dimGrid.z = 1;
-
-
-			cout << "Backward kernel executed with: " << x_grid_dim << " " << y_grid_dim << endl;
-
-			
-			if (i == layers.size() - 1) {
-				backward << <dimGrid, dimBlock >> > (input, activation, in_size, weight_matrix, first, gradient_in, gradient_out,
-					out_size, 0, static_cast<int>(layers[i].activation));
-			}
-			else {
-				backward << <dimGrid, dimBlock >> > (input, activation, in_size, weight_matrix, first, gradient_in, gradient_out,
-					out_size, layers[i + 1].out, static_cast<int>(layers[i].activation));
-			}
-			
-
-
-
-			// LOGOVANI
-			//checkDeviceMatrix<float>(layers[i].gradients, input_size * layers[i].out * sizeof(float), 1, input_size * layers[i].out, "%f ", "Gradient calc: ");
-
-			//TODO AKTUALIZACE VAH -- kernel update_parameters
-
-
-			float* input_activations = (i == 0) ? d_input : layers[i - 1].activations;
-			//int prev_layer_size = (i == 0) ? input_size : layers[i - 1].out;
-
-			update_parameters << <dimGrid, dimBlock >> > (input_activations, layers[i].gradients, layers[i].weights
-				, layers[i].biases, layers[i].in, layers[i].out);
-
-
-		}
-		for (int i = 0; i < layers.size(); i++) {
-			// LOGOVANI
-			//checkDeviceMatrix<float>(layers[i].weights, layers[i].in * layers[i].out * sizeof(float), 1, layers[i].in * layers[i].out, "%f ", "Weights: ");
-		}
-
-		std::cout << "Backward ok" << std::endl;
-
-
+		backward_phase(tc);
 
 	}
+}
+int main(int argc, char* argv[])
+{
+	initializeCUDA(deviceProp);
 
+	
+	TrainingContext tc;
+	tc.input_size = 4;
+	tc.input_dim = 2;
+	tc.output_size = 4;
+	tc.output_dim = 1;
+	tc.hidden_size = 20;
+	tc.num_hidden = 1;
+	tc.n_of_iterations = 50;
+
+	KernelSettings kernel_settings;
+	kernel_settings.x_thread_count = 16;
+	kernel_settings.y_thread_count = 16;
+	kernel_settings.dimBlock = { kernel_settings.x_thread_count, kernel_settings.y_thread_count ,1 };
+	kernel_settings.dimGrid = { 1, 1 ,1 };
+
+	tc.kernel_settings = kernel_settings;
+
+	// VYBER DATASET A ALOKUJ DATA
+	tc.dataset = getDatasetByName("dataset1");
+	allocate_input_data(tc);
+
+	// VYTVOR ARCHITEKTURU NEURONOVE SITE
+	create_network(tc);
+	
+	// HLAVNI TRENOVACI SMYCKA
+	train(tc);
 
 	cout << "That is all ..." << endl;
 }

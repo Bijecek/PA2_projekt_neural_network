@@ -1,9 +1,4 @@
-#include <cudaDefs.h>
-#include <random>
-#include <algorithm>
-#include <iostream>
 #include "NeuralNetwork.cuh"
-#include "ActivationFunctions.cuh"
 
 using std::cout;
 using std::endl;
@@ -125,4 +120,139 @@ __global__ void update_parameters(float* input, float* gradient, float* weight_m
 		atomicAdd(&biases[neuron_id], -learning_rate * grad);
 
 	}
+}
+
+// Forward fáze
+void forward_phase(TrainingContext& tc) {
+	float* current_input = tc.d_input;
+	for (int i = 0; i < tc.layers.size(); i++) {
+		Layer& current_layer = tc.layers[i];
+
+		// Nastavení rozmìrù gridu - dynamicky ho upravujeme podle rozmìrù <input_size; layers[i].out>
+
+		// (4 + 16 - 1) / 16
+		unsigned int x_grid_dim = (tc.input_size + tc.kernel_settings.x_thread_count - 1) / tc.kernel_settings.x_thread_count;
+		// (20 + 16 - 1) / 16
+		unsigned int y_grid_dim = (tc.layers[i].out + tc.kernel_settings.y_thread_count - 1) / tc.kernel_settings.y_thread_count;
+
+		tc.kernel_settings.dimGrid.x = x_grid_dim;
+		tc.kernel_settings.dimGrid.y = y_grid_dim;
+		tc.kernel_settings.dimGrid.z = 1;
+
+		cout << "Forward kernel executed with: " << x_grid_dim << " " << y_grid_dim << endl;
+
+		// LOGOVANI
+		checkDeviceMatrix<float>(current_layer.activations, tc.input_size * current_layer.out * sizeof(float), 1,
+			tc.input_size * current_layer.out, "%f ", "Before: ");
+
+		forward << <tc.kernel_settings.dimGrid, tc.kernel_settings.dimBlock >> > (current_input, current_layer.in, current_layer.weights,
+			current_layer.biases, current_layer.activations, current_layer.out, static_cast<int>(current_layer.activation));
+
+
+		// Zmìna vstupu
+		current_input = current_layer.activations;
+
+		// LOGOVANI
+		checkDeviceMatrix<float>(current_layer.activations, tc.input_size * current_layer.out * sizeof(float), 1,
+			tc.input_size * current_layer.out, "%f ", "After: ");
+	}
+
+	// LOGOVANI - vypis výstupu poslední vrstvy pro všechny vstupy
+	checkDeviceMatrix<float>(tc.layers[tc.layers.size() - 1].activations, tc.input_size * tc.layers[tc.layers.size() - 1].out *
+		sizeof(float), 1, tc.input_size * tc.layers[tc.layers.size() - 1].out, "%f ", "Activations: ");
+
+	std::cout << "Forward ok" << std::endl;
+
+}
+void loss_and_gradient_phase(TrainingContext& tc, int iteration) {
+
+	checkCudaErrors(cudaMemset(tc.d_loss, 0, sizeof(float)));
+
+
+	// TODO Nastavit dle batch_size -- momentálnì je to na 128
+	// S timto pocitame LOSS a GRADIENTy
+	tc.kernel_settings.dimBlock.x = 128;
+	tc.kernel_settings.dimBlock.y = 1;
+	tc.kernel_settings.dimBlock.z = 1;
+
+	tc.kernel_settings.dimGrid.x = 1;
+	tc.kernel_settings.dimGrid.y = 1;
+	tc.kernel_settings.dimGrid.z = 1;
+
+
+	// Poèítání loss -- jako vstup je output z pøedposlední do poslední vrstvy (proto size() - 1)
+	compute_loss << <tc.kernel_settings.dimGrid, tc.kernel_settings.dimBlock >> > (tc.layers[tc.layers.size() - 1].activations, tc.d_target, tc.d_loss, tc.output_size * tc.output_dim);
+
+	// Pøesun celkové loss zpátky na host 
+	checkDeviceMatrix<float>(tc.d_loss, sizeof(float), 1, 1, "%f ", "Loss: ");
+
+	float* tmp_loss = new float[1];
+	checkCudaErrors(cudaMemcpy(tmp_loss, tc.d_loss, sizeof(float), cudaMemcpyDeviceToHost));
+
+	// VYPSANI CELKOVE categorical crossentropy LOSS
+	cout << "Iteration: " << iteration << " -- loss: " << tmp_loss[0] << std::endl;
+
+	std::cout << "Loss ok" << std::endl;
+
+	compute_gradient << <tc.kernel_settings.dimGrid, tc.kernel_settings.dimBlock >> > (tc.layers[tc.layers.size() - 1].activations, tc.d_target, tc.d_gradient, tc.output_size * tc.output_dim);
+	// LOGOVANI
+	checkDeviceMatrix<float>(tc.d_gradient, tc.output_size * tc.output_dim * sizeof(float), 1, tc.output_size * tc.output_dim, "%f ", "Gradient: ");
+}
+
+void backward_phase(TrainingContext& tc) {
+	// Resetovani velikosti kernelu
+	tc.kernel_settings.dimBlock.x = tc.kernel_settings.x_thread_count;
+	tc.kernel_settings.dimBlock.y = tc.kernel_settings.y_thread_count;
+	tc.kernel_settings.dimBlock.z = 1;
+
+	for (int i = tc.layers.size() - 1; i >= 0; i--) {
+		float* input = (i == tc.layers.size() - 1 ? tc.d_gradient : tc.layers[i].gradients);
+		float* activation = tc.layers[i].activations;
+		int in_size = tc.layers[i].in;
+		int out_size = tc.layers[i].out;
+		float* weight_matrix = (i == tc.layers.size() - 1) ? nullptr : tc.layers[i + 1].weights;
+		bool first = (i == tc.layers.size() - 1) ? true : false;
+		float* gradient_in = (i == tc.layers.size() - 1) ? nullptr : tc.layers[i + 1].gradients;
+		float* gradient_out = tc.layers[i].gradients;
+
+
+		// (4 + 16 - 1) / 16
+		// (20 + 16 - 1) / 16
+		unsigned int x_grid_dim = (tc.input_size + tc.kernel_settings.x_thread_count - 1) / tc.kernel_settings.x_thread_count;
+		unsigned int y_grid_dim = (tc.layers[i].out + tc.kernel_settings.y_thread_count - 1) / tc.kernel_settings.y_thread_count;
+
+		tc.kernel_settings.dimGrid.x = x_grid_dim;
+		tc.kernel_settings.dimGrid.y = y_grid_dim;
+		tc.kernel_settings.dimGrid.z = 1;
+
+
+		cout << "Backward kernel executed with: " << x_grid_dim << " " << y_grid_dim << endl;
+
+
+		if (i == tc.layers.size() - 1) {
+			backward << <tc.kernel_settings.dimGrid, tc.kernel_settings.dimBlock >> > (input, activation, in_size, weight_matrix, first, gradient_in, gradient_out,
+				out_size, 0, static_cast<int>(tc.layers[i].activation));
+		}
+		else {
+			backward << <tc.kernel_settings.dimGrid, tc.kernel_settings.dimBlock >> > (input, activation, in_size, weight_matrix, first, gradient_in, gradient_out,
+				out_size, tc.layers[i + 1].out, static_cast<int>(tc.layers[i].activation));
+		}
+
+
+
+
+		// LOGOVANI
+		//checkDeviceMatrix<float>(layers[i].gradients, input_size * layers[i].out * sizeof(float), 1, input_size * layers[i].out, "%f ", "Gradient calc: ");
+
+
+		// AKTUALIZACE VAH
+		float* input_activations = (i == 0) ? tc.d_input : tc.layers[i - 1].activations;
+
+		update_parameters << <tc.kernel_settings.dimGrid, tc.kernel_settings.dimBlock >> > (input_activations, tc.layers[i].gradients, tc.layers[i].weights
+			, tc.layers[i].biases, tc.layers[i].in, tc.layers[i].out);
+
+
+	}
+
+	std::cout << "Backward ok" << std::endl;
 }

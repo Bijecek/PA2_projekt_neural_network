@@ -1,3 +1,4 @@
+#pragma once
 #include <cudaDefs.h>
 #include <iostream>
 #include <random>

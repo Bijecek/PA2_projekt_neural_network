@@ -1,7 +1,39 @@
 #pragma once
 
 #include <cudaDefs.h>
+#include <random>
+#include <algorithm>
+#include <iostream>
+
+#include "Datasets.cuh"
 #include "ActivationFunctions.cuh"
+#include "Layer.cuh"
+
+struct KernelSettings {
+	unsigned int x_thread_count;
+	unsigned int y_thread_count;
+	dim3 dimBlock;
+	dim3 dimGrid;
+};
+
+struct TrainingContext {
+	int input_size;
+	int input_dim;
+	int output_size;
+	int output_dim;
+	int hidden_size;
+	int num_hidden;
+	int n_of_iterations;
+
+	float* d_input = nullptr;
+	float* d_target = nullptr;
+	float* d_gradient = nullptr;
+	float* d_loss = nullptr;
+
+	std::vector<Layer> layers;
+	Dataset dataset;
+	KernelSettings kernel_settings;
+};
 
 __constant__ int num_samples;
 
@@ -24,4 +56,10 @@ __global__ void backward(float* input, float* activations, int input_size, float
 	, float* gradient_out, int output_size, int next_out_size, int activation_type);
 
 __global__ void update_parameters(float* input, float* gradient, float* weight_matrix, float* biases, int input_size, int output_size);
+
+void forward_phase(TrainingContext& tc);
+
+void loss_and_gradient_phase(TrainingContext& tc, int iteration);
+
+void backward_phase(TrainingContext& tc);
 
