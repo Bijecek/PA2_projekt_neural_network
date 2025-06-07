@@ -11,7 +11,16 @@
     </ProjectConfiguration>
   </ItemGroup>
   <ItemGroup>
+    <CudaCompile Include="src\Datasets.cu" />
+    <CudaCompile Include="src\Layer.cu" />
+    <CudaCompile Include="src\NeuralNetwork.cu" />
     <CudaCompile Include="src\Runner.cu" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="src\ActivationFunctions.cuh" />
+    <ClInclude Include="src\Datasets.cuh" />
+    <ClInclude Include="src\Layer.cuh" />
+    <ClInclude Include="src\NeuralNetwork.cuh" />
   </ItemGroup>
   <PropertyGroup Label="Globals">
     <ProjectGuid>{8DBC398B-00A0-4734-A4F5-21CD8434600C}</ProjectGuid>
