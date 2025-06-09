@@ -71,7 +71,7 @@ __global__ void compute_gradient(float* y_pred, float* y_true, float* gradient, 
 		gradient[idx] = y_pred[idx] - y_true[idx];
 	}
 }
-__global__ void backward(float* input, float* activations, int input_size, float* weight_matrix, bool first, float* gradient_in
+__global__ void backward(float* activations, int input_size, float* weight_matrix, bool first, float* gradient_in
 	, float* gradient_out, int output_size, int next_out_size, int activation_type) {
 
 	int sample_id = blockIdx.x * blockDim.x + threadIdx.x;
@@ -80,7 +80,7 @@ __global__ void backward(float* input, float* activations, int input_size, float
 	if (sample_id < num_samples && neuron_id < output_size) {
 
 		if (first) {
-			gradient_out[sample_id * output_size + neuron_id] = input[sample_id * output_size + neuron_id] * derivate_activation_functions[activation_type](activations[sample_id * output_size + neuron_id]);
+			gradient_out[sample_id * output_size + neuron_id] = gradient_in[sample_id * output_size + neuron_id] * derivate_activation_functions[activation_type](activations[sample_id * output_size + neuron_id]);
 		}
 		else {
 
@@ -206,13 +206,12 @@ void backward_phase(TrainingContext& tc) {
 	tc.kernel_settings.dimBlock.z = 1;
 
 	for (int i = tc.layers.size() - 1; i >= 0; i--) {
-		float* input = (i == tc.layers.size() - 1 ? tc.d_gradient : tc.layers[i].gradients);
 		float* activation = tc.layers[i].activations;
 		int in_size = tc.layers[i].in;
 		int out_size = tc.layers[i].out;
 		float* weight_matrix = (i == tc.layers.size() - 1) ? nullptr : tc.layers[i + 1].weights;
 		bool first = (i == tc.layers.size() - 1) ? true : false;
-		float* gradient_in = (i == tc.layers.size() - 1) ? nullptr : tc.layers[i + 1].gradients;
+		float* gradient_in = (i == tc.layers.size() - 1) ? tc.d_gradient : tc.layers[i + 1].gradients;
 		float* gradient_out = tc.layers[i].gradients;
 
 
@@ -230,11 +229,11 @@ void backward_phase(TrainingContext& tc) {
 
 
 		if (i == tc.layers.size() - 1) {
-			backward << <tc.kernel_settings.dimGrid, tc.kernel_settings.dimBlock >> > (input, activation, in_size, weight_matrix, first, gradient_in, gradient_out,
+			backward << <tc.kernel_settings.dimGrid, tc.kernel_settings.dimBlock >> > (activation, in_size, weight_matrix, first, gradient_in, gradient_out,
 				out_size, 0, static_cast<int>(tc.layers[i].activation));
 		}
 		else {
-			backward << <tc.kernel_settings.dimGrid, tc.kernel_settings.dimBlock >> > (input, activation, in_size, weight_matrix, first, gradient_in, gradient_out,
+			backward << <tc.kernel_settings.dimGrid, tc.kernel_settings.dimBlock >> > (activation, in_size, weight_matrix, first, gradient_in, gradient_out,
 				out_size, tc.layers[i + 1].out, static_cast<int>(tc.layers[i].activation));
 		}
 

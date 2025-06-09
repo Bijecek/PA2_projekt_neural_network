@@ -22,24 +22,34 @@ void allocate_input_data(TrainingContext& tc) {
 	checkCudaErrors(cudaMemcpy(tc.d_target, tc.dataset.target.data(), tc.output_size * tc.output_dim * sizeof(float), cudaMemcpyHostToDevice));
 }
 
-// TODO CUSTOM NETWORK
-void create_network(TrainingContext& tc) {
-	// Vstupní -> Hidden1
-	tc.layers.push_back(createDenseLayer(tc.input_dim, tc.hidden_size, ActivationFunction::RELU));
-
-	// Hidden1 -> HiddenN
-	for (int i = 0; i < tc.num_hidden; i++) {
-		tc.layers.push_back(createDenseLayer(tc.hidden_size, tc.hidden_size, ActivationFunction::RELU));
+void create_input(TrainingContext& tc, int neurons) {
+	tc.input_dim = neurons;
+}
+void create_dense(TrainingContext& tc, int neurons, ActivationFunction act) {
+	// Pokud se jedná o první vrstvu
+	if (tc.layers.empty()) {
+		tc.layers.push_back(createDenseLayer(tc.input_dim, neurons, act));
 	}
-
-	// HiddenN -> Výstupní
-	tc.layers.push_back(createDenseLayer(tc.hidden_size, tc.output_dim, ActivationFunction::SIGMOID));
-
+	else {
+		int last_size = tc.layers[tc.layers.size() - 1].out;
+		tc.layers.push_back(createDenseLayer(last_size, neurons, act));
+	}
+}
+void build_network(TrainingContext& tc) {
 	// GPU ALOKACE
 	for (auto& layer : tc.layers) {
 		initLayer(layer, tc.input_size);
 	}
+
+	cout << "Network architecture:" << endl;
+	cout << "Input: " << tc.input_dim << " neurons" << endl;
+	for (int i = 0; i < tc.layers.size(); i++) {
+		auto& layer = tc.layers[i];
+		cout << "Hidden layer " << i << ": " << layer.out << " neurons | activation: " << getActivationFunction(layer.activation) << endl;
+	}
+	//cout << "Input: " << tc.input_dim << "neurons" << endl;
 }
+
 
 void train(TrainingContext& tc) {
 	float* d_calculated_loss;
@@ -97,8 +107,6 @@ int main(int argc, char* argv[])
 	tc.input_dim = 2;
 	tc.output_size = 4;
 	tc.output_dim = 1;
-	tc.hidden_size = 20;
-	tc.num_hidden = 1;
 	tc.n_of_iterations = 50;
 
 	KernelSettings kernel_settings;
@@ -114,7 +122,12 @@ int main(int argc, char* argv[])
 	allocate_input_data(tc);
 
 	// VYTVOR ARCHITEKTURU NEURONOVE SITE
-	create_network(tc);
+	create_input(tc, 2);
+	create_dense(tc, 20, ActivationFunction::RELU);
+	create_dense(tc, 20, ActivationFunction::RELU);
+	create_dense(tc, 1, ActivationFunction::SIGMOID);
+
+	build_network(tc);
 	
 	// HLAVNI TRENOVACI SMYCKA
 	train(tc);

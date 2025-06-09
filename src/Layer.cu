@@ -62,3 +62,15 @@ void initLayer(Layer& layer, int input_size) {
         checkCudaErrors(cudaMalloc(&layer.mask, input_size * layer.out * sizeof(bool)));
     }
 }
+std::string getActivationFunction(ActivationFunction af) {
+    switch (af) {
+    case ActivationFunction::RELU:
+        return "ReLU";
+    case ActivationFunction::SIGMOID:
+        return "Sigmoid";
+    case ActivationFunction::NONE:
+        return "None";
+    default:
+        return "Unknown";
+    }
+}
