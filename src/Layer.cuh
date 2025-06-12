@@ -15,6 +15,11 @@ enum class ActivationFunction {
 	NONE
 };
 
+enum class LayerLogicalType {
+	INPUT,
+	OUTPUT,
+	OTHER
+};
 struct Layer {
 	LayerType type;
 	ActivationFunction activation;

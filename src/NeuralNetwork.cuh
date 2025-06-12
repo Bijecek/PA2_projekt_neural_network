@@ -36,6 +36,9 @@ struct TrainingContext {
 };
 
 __constant__ int num_samples;
+__constant__ float learning_rate;
+
+extern std::vector<std::pair<int, ActivationFunction>> layer_specifications;
 
 constexpr unsigned int THREADS_PER_BLOCK = 128;
 
@@ -46,20 +49,22 @@ __device__ float (*derivate_activation_functions[2])(float) = { derivate_relu, d
 
 void setNumSamplesConstant(int input_size);
 
+void setLearningRateConstant(int learning_rate);
+
 __global__ void forward(const float* __restrict__ input_data, int input_size, const float* __restrict__ weight_matrix, const float* __restrict__ bias, float* __restrict__ output_data, int output_size, int activation_type);
 
 __global__ void compute_loss(float* y_predicted, float* y_true, float* loss, int size);
 
 __global__ void compute_gradient(float* y_pred, float* y_true, float* gradient, int size);
 
-__global__ void backward(float* input, float* activations, int input_size, float* weight_matrix, bool first, float* gradient_in
+__global__ void backward(float* activations, int input_size, float* weight_matrix, bool first, float* gradient_in
 	, float* gradient_out, int output_size, int next_out_size, int activation_type);
 
 __global__ void update_parameters(float* input, float* gradient, float* weight_matrix, float* biases, int input_size, int output_size);
 
-void forward_phase(TrainingContext& tc);
+void forward_phase(TrainingContext& tc, bool enable_logging);
 
-void loss_and_gradient_phase(TrainingContext& tc, int iteration);
+void loss_and_gradient_phase(TrainingContext& tc, int iteration, bool enable_logging);
 
-void backward_phase(TrainingContext& tc);
+void backward_phase(TrainingContext& tc, bool enable_logging);
 

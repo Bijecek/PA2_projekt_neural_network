@@ -25,17 +25,28 @@ void allocate_input_data(TrainingContext& tc) {
 void create_input(TrainingContext& tc, int neurons) {
 	tc.input_dim = neurons;
 }
-void create_dense(TrainingContext& tc, int neurons, ActivationFunction act) {
+void create_dense(TrainingContext& tc, int neurons, ActivationFunction act, LayerLogicalType type) {
 	// Pokud se jedná o první vrstvu
-	if (tc.layers.empty()) {
-		tc.layers.push_back(createDenseLayer(tc.input_dim, neurons, act));
+	if (type == LayerLogicalType::INPUT) {
+		// Nastavení vstupní dimenze (počet neuronů vstupu)
+		tc.input_dim = neurons;
 	}
-	else {
-		int last_size = tc.layers[tc.layers.size() - 1].out;
-		tc.layers.push_back(createDenseLayer(last_size, neurons, act));
+	else if(type == LayerLogicalType::OUTPUT){
+		tc.output_dim = neurons;
 	}
+	layer_specifications.push_back(std::make_pair(neurons, act));
+	
 }
 void build_network(TrainingContext& tc) {
+
+	// Naplnění TrainingContext vrstev
+	for (int i = 0; i < layer_specifications.size() - 1;i++) {
+		auto& first = layer_specifications[i];
+		auto& next = layer_specifications[i + 1];
+
+		tc.layers.push_back(createDenseLayer(first.first, next.first, next.second));
+	}
+
 	// GPU ALOKACE
 	for (auto& layer : tc.layers) {
 		initLayer(layer, tc.input_size);
@@ -51,12 +62,14 @@ void build_network(TrainingContext& tc) {
 }
 
 
-void train(TrainingContext& tc) {
+void train(TrainingContext& tc, int learning_rate, bool enable_logging) {
 	float* d_calculated_loss;
 	checkCudaErrors(cudaMalloc(&d_calculated_loss, sizeof(float)));
 
 
 	setNumSamplesConstant(tc.input_size);
+
+	setLearningRateConstant(learning_rate);
 
 
 	// Definice loss pole
@@ -87,13 +100,13 @@ void train(TrainingContext& tc) {
 		checkCudaErrors(cudaMemset(d_calculated_loss, 0, sizeof(float)));
 
 		// Forward fáze
-		forward_phase(tc);
+		forward_phase(tc, enable_logging);
 
 		// LOSS A GRADIENT FAZE
-		loss_and_gradient_phase(tc, iteration);
+		loss_and_gradient_phase(tc, iteration, enable_logging);
 
 		// Backward fáze
-		backward_phase(tc);
+		backward_phase(tc, enable_logging);
 
 	}
 }
@@ -101,13 +114,15 @@ int main(int argc, char* argv[])
 {
 	initializeCUDA(deviceProp);
 
+	int learning_rate = 0.01;
+
 	
 	TrainingContext tc;
 	tc.input_size = 4;
 	tc.input_dim = 2;
 	tc.output_size = 4;
 	tc.output_dim = 1;
-	tc.n_of_iterations = 50;
+	tc.n_of_iterations = 2000;
 
 	KernelSettings kernel_settings;
 	kernel_settings.x_thread_count = 16;
@@ -117,20 +132,22 @@ int main(int argc, char* argv[])
 
 	tc.kernel_settings = kernel_settings;
 
+	// VYTVOR ARCHITEKTURU NEURONOVE SITE
+	// TODO VETSI VELIKOST 
+	create_dense(tc, 2, ActivationFunction::NONE, LayerLogicalType::INPUT);
+	create_dense(tc, 300, ActivationFunction::RELU, LayerLogicalType::OTHER);
+	create_dense(tc, 300, ActivationFunction::RELU, LayerLogicalType::OTHER);
+	create_dense(tc, 1, ActivationFunction::SIGMOID, LayerLogicalType::OUTPUT);
+
+	build_network(tc);
+	
 	// VYBER DATASET A ALOKUJ DATA
 	tc.dataset = getDatasetByName("dataset1");
 	allocate_input_data(tc);
 
-	// VYTVOR ARCHITEKTURU NEURONOVE SITE
-	create_input(tc, 2);
-	create_dense(tc, 20, ActivationFunction::RELU);
-	create_dense(tc, 20, ActivationFunction::RELU);
-	create_dense(tc, 1, ActivationFunction::SIGMOID);
 
-	build_network(tc);
-	
 	// HLAVNI TRENOVACI SMYCKA
-	train(tc);
+	train(tc, learning_rate, false);
 
 	cout << "That is all ..." << endl;
 }

@@ -44,7 +44,8 @@ void initLayer(Layer& layer, int input_size) {
 
         // Náhodné naplnění vah
         std::mt19937 gen(42);
-        std::uniform_real_distribution<float> dist(-1.0, 1.0f);
+        //std::uniform_real_distribution<float> dist(-1.0, 1.0f);
+        std::uniform_real_distribution<float> dist(-0.2, 0.2f);
 
         std::vector<float> temporary_weights(layer.in * layer.out);
         std::vector<float> temporary_biases(layer.out);

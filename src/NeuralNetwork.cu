@@ -3,9 +3,14 @@
 using std::cout;
 using std::endl;
 
+std::vector<std::pair<int, ActivationFunction>> layer_specifications;
+
 
 void setNumSamplesConstant(int input_size) {
 	checkCudaErrors(cudaMemcpyToSymbol((const void*)&num_samples, &input_size, sizeof(int)));
+}
+void setLearningRateConstant(int learning_r) {
+	checkCudaErrors(cudaMemcpyToSymbol((const void*)&learning_rate, &learning_r, sizeof(float)));
 }
 
 // Jedno vlákno = jeden sample - jeden neuron
@@ -101,9 +106,9 @@ __global__ void update_parameters(float* input, float* gradient, float* weight_m
 	int sample_id = blockIdx.x * blockDim.x + threadIdx.x;
 	int neuron_id = blockIdx.y * blockDim.y + threadIdx.y;
 
-	if (sample_id < num_samples) {
+	if (sample_id < num_samples && neuron_id < output_size) {
 		// Learning rate
-		float learning_rate = 0.1f;
+		float learning_rate = 0.01f;
 
 
 		// Get the gradient for the current sample and output neuron
@@ -123,7 +128,7 @@ __global__ void update_parameters(float* input, float* gradient, float* weight_m
 }
 
 // Forward fáze
-void forward_phase(TrainingContext& tc) {
+void forward_phase(TrainingContext& tc, bool enable_logging) {
 	float* current_input = tc.d_input;
 	for (int i = 0; i < tc.layers.size(); i++) {
 		Layer& current_layer = tc.layers[i];
@@ -139,11 +144,15 @@ void forward_phase(TrainingContext& tc) {
 		tc.kernel_settings.dimGrid.y = y_grid_dim;
 		tc.kernel_settings.dimGrid.z = 1;
 
-		cout << "Forward kernel executed with: " << x_grid_dim << " " << y_grid_dim << endl;
+		if (enable_logging) {
+			cout << "Forward kernel executed with: " << x_grid_dim << " " << y_grid_dim << endl;
+		}
 
 		// LOGOVANI
-		checkDeviceMatrix<float>(current_layer.activations, tc.input_size * current_layer.out * sizeof(float), 1,
-			tc.input_size * current_layer.out, "%f ", "Before: ");
+		if (enable_logging) {
+			checkDeviceMatrix<float>(current_layer.activations, tc.input_size * current_layer.out * sizeof(float), 1,
+				tc.input_size * current_layer.out, "%f ", "Before: ");
+		}
 
 		forward << <tc.kernel_settings.dimGrid, tc.kernel_settings.dimBlock >> > (current_input, current_layer.in, current_layer.weights,
 			current_layer.biases, current_layer.activations, current_layer.out, static_cast<int>(current_layer.activation));
@@ -153,18 +162,24 @@ void forward_phase(TrainingContext& tc) {
 		current_input = current_layer.activations;
 
 		// LOGOVANI
-		checkDeviceMatrix<float>(current_layer.activations, tc.input_size * current_layer.out * sizeof(float), 1,
-			tc.input_size * current_layer.out, "%f ", "After: ");
+		if (enable_logging) {
+			checkDeviceMatrix<float>(current_layer.activations, tc.input_size * current_layer.out * sizeof(float), 1,
+				tc.input_size * current_layer.out, "%f ", "After: ");
+		}
 	}
 
 	// LOGOVANI - vypis výstupu poslední vrstvy pro všechny vstupy
+	
 	checkDeviceMatrix<float>(tc.layers[tc.layers.size() - 1].activations, tc.input_size * tc.layers[tc.layers.size() - 1].out *
-		sizeof(float), 1, tc.input_size * tc.layers[tc.layers.size() - 1].out, "%f ", "Activations: ");
+			sizeof(float), 1, tc.input_size * tc.layers[tc.layers.size() - 1].out, "%f ", "Activations: ");
+	
 
-	std::cout << "Forward ok" << std::endl;
+	if (enable_logging) {
+		std::cout << "Forward ok" << std::endl;
+	}
 
 }
-void loss_and_gradient_phase(TrainingContext& tc, int iteration) {
+void loss_and_gradient_phase(TrainingContext& tc, int iteration, bool enable_logging) {
 
 	checkCudaErrors(cudaMemset(tc.d_loss, 0, sizeof(float)));
 
@@ -184,22 +199,28 @@ void loss_and_gradient_phase(TrainingContext& tc, int iteration) {
 	compute_loss << <tc.kernel_settings.dimGrid, tc.kernel_settings.dimBlock >> > (tc.layers[tc.layers.size() - 1].activations, tc.d_target, tc.d_loss, tc.output_size * tc.output_dim);
 
 	// Pøesun celkové loss zpátky na host 
-	checkDeviceMatrix<float>(tc.d_loss, sizeof(float), 1, 1, "%f ", "Loss: ");
-
+	if (enable_logging) {
+		checkDeviceMatrix<float>(tc.d_loss, sizeof(float), 1, 1, "%f ", "Loss: ");
+	}
 	float* tmp_loss = new float[1];
 	checkCudaErrors(cudaMemcpy(tmp_loss, tc.d_loss, sizeof(float), cudaMemcpyDeviceToHost));
 
 	// VYPSANI CELKOVE categorical crossentropy LOSS
 	cout << "Iteration: " << iteration << " -- loss: " << tmp_loss[0] << std::endl;
 
-	std::cout << "Loss ok" << std::endl;
+	if (enable_logging) {
+		std::cout << "Loss ok" << std::endl;
+	}
 
 	compute_gradient << <tc.kernel_settings.dimGrid, tc.kernel_settings.dimBlock >> > (tc.layers[tc.layers.size() - 1].activations, tc.d_target, tc.d_gradient, tc.output_size * tc.output_dim);
+	
 	// LOGOVANI
-	checkDeviceMatrix<float>(tc.d_gradient, tc.output_size * tc.output_dim * sizeof(float), 1, tc.output_size * tc.output_dim, "%f ", "Gradient: ");
+	if (enable_logging) {
+		checkDeviceMatrix<float>(tc.d_gradient, tc.output_size * tc.output_dim * sizeof(float), 1, tc.output_size * tc.output_dim, "%f ", "Gradient: ");
+	}
 }
 
-void backward_phase(TrainingContext& tc) {
+void backward_phase(TrainingContext& tc, bool enable_logging) {
 	// Resetovani velikosti kernelu
 	tc.kernel_settings.dimBlock.x = tc.kernel_settings.x_thread_count;
 	tc.kernel_settings.dimBlock.y = tc.kernel_settings.y_thread_count;
@@ -225,7 +246,9 @@ void backward_phase(TrainingContext& tc) {
 		tc.kernel_settings.dimGrid.z = 1;
 
 
-		cout << "Backward kernel executed with: " << x_grid_dim << " " << y_grid_dim << endl;
+		if (enable_logging) {
+			cout << "Backward kernel executed with: " << x_grid_dim << " " << y_grid_dim << endl;
+		}
 
 
 		if (i == tc.layers.size() - 1) {
@@ -253,5 +276,7 @@ void backward_phase(TrainingContext& tc) {
 
 	}
 
-	std::cout << "Backward ok" << std::endl;
+	if (enable_logging) {
+		std::cout << "Backward ok" << std::endl;
+	}
 }
