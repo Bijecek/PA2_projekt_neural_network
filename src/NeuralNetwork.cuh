@@ -24,11 +24,16 @@ struct TrainingContext {
 	int num_hidden;
 	int n_of_iterations;
 	float learning_rate;
+	int batch_size;
+	int total_batch_count;
 
 	float* d_input = nullptr;
 	float* d_target = nullptr;
 	float* d_gradient = nullptr;
 	float* d_loss = nullptr;
+	float* d_accuracy = nullptr;
+
+	std::vector<float> batch_loss, batch_accuracy;
 
 	std::vector<Layer> layers;
 	Dataset dataset;
@@ -38,7 +43,7 @@ struct TrainingContext {
 
 extern std::vector<std::pair<int, ActivationFunction>> layer_specifications;
 
-constexpr unsigned int THREADS_PER_BLOCK = 128;
+constexpr unsigned int THREADS_PER_BLOCK = 1028;
 
 // Pole pointerù na aktivaèní funkce
 __device__ float (*activation_functions[2])(float) = { convert_relu, convert_sigmoid};
@@ -53,7 +58,7 @@ __global__ void forward(const float* __restrict__ input_data, int input_size, co
 
 __global__ void compute_loss(float* y_predicted, float* y_true, float* loss, int size);
 
-__global__ void compute_gradient(float* y_pred, float* y_true, float* gradient, int size);
+__global__ void compute_gradient(float* y_pred, float* y_true, float* gradient, int size, float* accuracy);
 
 __global__ void backward(float* activations, int input_size, float* weight_matrix, bool first, float* gradient_in
 	, float* gradient_out, int output_size, int next_out_size, int activation_type);
@@ -62,7 +67,7 @@ __global__ void update_parameters(float* input, float* gradient, float* weight_m
 
 void forward_phase(TrainingContext& tc, bool enable_logging);
 
-void loss_and_gradient_phase(TrainingContext& tc, int iteration, bool enable_logging);
+void loss_and_gradient_phase(TrainingContext& tc, int iteration, int actual_batch_size, bool enable_logging);
 
 void backward_phase(TrainingContext& tc, bool enable_logging);
 

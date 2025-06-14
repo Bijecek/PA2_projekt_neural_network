@@ -15,11 +15,9 @@ cudaDeviceProp deviceProp = cudaDeviceProp();
 
 
 void allocate_input_data(TrainingContext& tc) {
-	checkCudaErrors(cudaMalloc(&tc.d_input, tc.num_samples * tc.input_dim * sizeof(float)));
-	checkCudaErrors(cudaMemcpy(tc.d_input, tc.dataset.input.data(), tc.num_samples * tc.input_dim * sizeof(float), cudaMemcpyHostToDevice));
+	checkCudaErrors(cudaMalloc(&tc.d_input, tc.batch_size * tc.input_dim * sizeof(float)));
 
-	checkCudaErrors(cudaMalloc(&tc.d_target, tc.num_samples * tc.output_dim * sizeof(float)));
-	checkCudaErrors(cudaMemcpy(tc.d_target, tc.dataset.target.data(), tc.num_samples * tc.output_dim * sizeof(float), cudaMemcpyHostToDevice));
+	checkCudaErrors(cudaMalloc(&tc.d_target, tc.batch_size * tc.output_dim * sizeof(float)));
 }
 
 void create_input(TrainingContext& tc, int neurons) {
@@ -38,6 +36,7 @@ void create_dense(TrainingContext& tc, int neurons, ActivationFunction act, Laye
 	
 }
 void build_network(TrainingContext& tc) {
+	tc.total_batch_count = static_cast<int>(std::ceil(tc.num_samples*1.0 / tc.batch_size));
 
 	// Naplnění TrainingContext vrstev
 	for (int i = 0; i < layer_specifications.size() - 1;i++) {
@@ -49,7 +48,7 @@ void build_network(TrainingContext& tc) {
 
 	// GPU ALOKACE
 	for (auto& layer : tc.layers) {
-		initLayer(layer, tc.num_samples);
+		initLayer(layer, tc.batch_size);
 	}
 
 	cout << "Network architecture:" << endl;
@@ -60,19 +59,37 @@ void build_network(TrainingContext& tc) {
 	}
 }
 
+void reset_print_statistics(TrainingContext& tc, int iteration) {
+	float batch_loss = 0.0;
+	float batch_accuracy = 0.0;
+
+	for (int i = 0; i < tc.total_batch_count; i++) {
+		batch_loss += tc.batch_loss[i];
+		batch_accuracy += tc.batch_accuracy[i];
+	}
+	batch_loss /= tc.batch_size;
+	batch_accuracy /= (tc.batch_size * tc.total_batch_count);
+
+	// VYPSANI CELKOVE categorical crossentropy LOSS
+	cout << "Iteration: " << iteration << " -- batch loss: " << batch_loss << " Batch accuracy: " << batch_accuracy << std::endl;
+
+	// Resetuj batch pole
+	tc.batch_accuracy.clear();
+	tc.batch_loss.clear();
+}
 
 void train(TrainingContext& tc, bool enable_logging) {
 	float* d_calculated_loss;
 	checkCudaErrors(cudaMalloc(&d_calculated_loss, sizeof(float)));
 
 
-	setNumSamplesConstant(tc.num_samples);
+	setNumSamplesConstant(tc.batch_size);
 
 	setLearningRateConstant(tc.learning_rate);
 
 
 	// Definice loss pole
-	const int gradient_size = tc.num_samples * tc.output_dim;
+	const int gradient_size = tc.batch_size * tc.output_dim;
 
 	float* d_gradient;
 	checkCudaErrors(cudaMalloc(&d_gradient, gradient_size * sizeof(float)));
@@ -81,6 +98,8 @@ void train(TrainingContext& tc, bool enable_logging) {
 
 	checkCudaErrors(cudaMalloc(&tc.d_loss, sizeof(float)));
 	checkCudaErrors(cudaMalloc(&tc.d_gradient, gradient_size * sizeof(float)));
+	checkCudaErrors(cudaMalloc(&tc.d_accuracy, sizeof(float)));
+
 
 
 	//******************************************************************************************|
@@ -88,17 +107,42 @@ void train(TrainingContext& tc, bool enable_logging) {
 	//******************************************************************************************|
 	for (int iteration = 0; iteration < tc.n_of_iterations; iteration++) {
 
-		// Resetovani loss
-		checkCudaErrors(cudaMemset(d_calculated_loss, 0, sizeof(float)));
+		std::mt19937 generator(iteration);
 
-		// Forward fáze
-		forward_phase(tc, enable_logging);
+		for (int batch_id = 0; batch_id < tc.total_batch_count; batch_id++) {
 
-		// LOSS A GRADIENT FAZE
-		loss_and_gradient_phase(tc, iteration, enable_logging);
+			// Resetovani loss
+			checkCudaErrors(cudaMemset(d_calculated_loss, 0.0, sizeof(float)));
+			checkCudaErrors(cudaMemset(tc.d_accuracy, 0.0, sizeof(float)));
 
-		// Backward fáze
-		backward_phase(tc, enable_logging);
+			Dataset batch = get_batch(tc.dataset, tc.batch_size, batch_id);
+
+			int actual_batch_size = batch.target.size();
+			setNumSamplesConstant(actual_batch_size);
+
+			// Kopírování dat na GPU
+
+			checkCudaErrors(cudaMemcpy(tc.d_input, batch.input.data(), actual_batch_size * tc.input_dim * sizeof(float), cudaMemcpyHostToDevice));
+			checkCudaErrors(cudaMemcpy(tc.d_target, batch.target.data(), actual_batch_size * tc.output_dim * sizeof(float), cudaMemcpyHostToDevice));
+
+
+			// Forward fáze
+			forward_phase(tc, enable_logging);
+
+			// LOSS A GRADIENT FAZE
+			loss_and_gradient_phase(tc, iteration, actual_batch_size, enable_logging);
+
+			// Backward fáze
+			backward_phase(tc, enable_logging);
+
+		}
+		//shuffle_batches(t)
+		
+		// Zamíchej vstupní data - batche
+		//std::shuffle(tc.dataset.input.begin(), tc.dataset.input.end(), generator);
+		//std::shuffle(tc.dataset.target.begin(), tc.dataset.target.end(), generator);
+		
+		reset_print_statistics(tc, iteration);
 
 	}
 }
@@ -106,11 +150,18 @@ int main(int argc, char* argv[])
 {
 	initializeCUDA(deviceProp);
 
-	
 	TrainingContext tc;
-	tc.num_samples = 4;
+
+	// VYBER DATASET
+	tc.dataset.dimensions = 2;
+	tc.dataset = getDatasetByName("dataset3");
+	//tc.num_samples = 4;
+	tc.num_samples = tc.dataset.target.size();
+
+
 	tc.n_of_iterations = 1000;
-	tc.learning_rate = 0.1;
+	tc.learning_rate = 0.001;
+	tc.batch_size = 64;
 
 	KernelSettings kernel_settings;
 	kernel_settings.x_thread_count = 32;
@@ -121,18 +172,15 @@ int main(int argc, char* argv[])
 	tc.kernel_settings = kernel_settings;
 
 	// VYTVOR ARCHITEKTURU NEURONOVE SITE
-	// TODO VETSI VELIKOST 
-	create_dense(tc, 2, ActivationFunction::NONE, LayerLogicalType::INPUT);
-	//create_dense(tc, 300, ActivationFunction::RELU, LayerLogicalType::OTHER);
-	create_dense(tc, 8, ActivationFunction::RELU, LayerLogicalType::OTHER);
+	create_dense(tc, tc.dataset.dimensions, ActivationFunction::NONE, LayerLogicalType::INPUT);
+	create_dense(tc, 50, ActivationFunction::RELU, LayerLogicalType::OTHER);
+	//create_dense(tc, 50, ActivationFunction::RELU, LayerLogicalType::OTHER);
 	create_dense(tc, 1, ActivationFunction::SIGMOID, LayerLogicalType::OUTPUT);
 
 	build_network(tc);
-	
-	// VYBER DATASET A ALOKUJ DATA
-	tc.dataset = getDatasetByName("dataset1");
-	allocate_input_data(tc);
 
+	// Alokuj vstupní data na GPU
+	allocate_input_data(tc);
 
 	// HLAVNI TRENOVACI SMYCKA
 	train(tc, false);
