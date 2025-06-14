@@ -15,11 +15,11 @@ cudaDeviceProp deviceProp = cudaDeviceProp();
 
 
 void allocate_input_data(TrainingContext& tc) {
-	checkCudaErrors(cudaMalloc(&tc.d_input, tc.input_size * tc.input_dim * sizeof(float)));
-	checkCudaErrors(cudaMemcpy(tc.d_input, tc.dataset.input.data(), tc.input_size * tc.input_dim * sizeof(float), cudaMemcpyHostToDevice));
+	checkCudaErrors(cudaMalloc(&tc.d_input, tc.num_samples * tc.input_dim * sizeof(float)));
+	checkCudaErrors(cudaMemcpy(tc.d_input, tc.dataset.input.data(), tc.num_samples * tc.input_dim * sizeof(float), cudaMemcpyHostToDevice));
 
-	checkCudaErrors(cudaMalloc(&tc.d_target, tc.output_size * tc.output_dim * sizeof(float)));
-	checkCudaErrors(cudaMemcpy(tc.d_target, tc.dataset.target.data(), tc.output_size * tc.output_dim * sizeof(float), cudaMemcpyHostToDevice));
+	checkCudaErrors(cudaMalloc(&tc.d_target, tc.num_samples * tc.output_dim * sizeof(float)));
+	checkCudaErrors(cudaMemcpy(tc.d_target, tc.dataset.target.data(), tc.num_samples * tc.output_dim * sizeof(float), cudaMemcpyHostToDevice));
 }
 
 void create_input(TrainingContext& tc, int neurons) {
@@ -49,7 +49,7 @@ void build_network(TrainingContext& tc) {
 
 	// GPU ALOKACE
 	for (auto& layer : tc.layers) {
-		initLayer(layer, tc.input_size);
+		initLayer(layer, tc.num_samples);
 	}
 
 	cout << "Network architecture:" << endl;
@@ -58,34 +58,26 @@ void build_network(TrainingContext& tc) {
 		auto& layer = tc.layers[i];
 		cout << "Hidden layer " << i << ": " << layer.out << " neurons | activation: " << getActivationFunction(layer.activation) << endl;
 	}
-	//cout << "Input: " << tc.input_dim << "neurons" << endl;
 }
 
 
-void train(TrainingContext& tc, int learning_rate, bool enable_logging) {
+void train(TrainingContext& tc, bool enable_logging) {
 	float* d_calculated_loss;
 	checkCudaErrors(cudaMalloc(&d_calculated_loss, sizeof(float)));
 
 
-	setNumSamplesConstant(tc.input_size);
+	setNumSamplesConstant(tc.num_samples);
 
-	setLearningRateConstant(learning_rate);
+	setLearningRateConstant(tc.learning_rate);
 
 
 	// Definice loss pole
-	const int gradient_size = tc.output_size * tc.output_dim;
+	const int gradient_size = tc.num_samples * tc.output_dim;
 
 	float* d_gradient;
 	checkCudaErrors(cudaMalloc(&d_gradient, gradient_size * sizeof(float)));
 
 	float* h_gradient = new float[gradient_size];
-
-	const int x_thread_count = 16;
-	const int y_thread_count = 16;
-
-
-	dim3 dimBlock{ x_thread_count, y_thread_count ,1 };
-	dim3 dimGrid{ 1,1 ,1 };
 
 	checkCudaErrors(cudaMalloc(&tc.d_loss, sizeof(float)));
 	checkCudaErrors(cudaMalloc(&tc.d_gradient, gradient_size * sizeof(float)));
@@ -114,19 +106,15 @@ int main(int argc, char* argv[])
 {
 	initializeCUDA(deviceProp);
 
-	int learning_rate = 0.01;
-
 	
 	TrainingContext tc;
-	tc.input_size = 4;
-	tc.input_dim = 2;
-	tc.output_size = 4;
-	tc.output_dim = 1;
-	tc.n_of_iterations = 2000;
+	tc.num_samples = 4;
+	tc.n_of_iterations = 1000;
+	tc.learning_rate = 0.1;
 
 	KernelSettings kernel_settings;
-	kernel_settings.x_thread_count = 16;
-	kernel_settings.y_thread_count = 16;
+	kernel_settings.x_thread_count = 32;
+	kernel_settings.y_thread_count = 32;
 	kernel_settings.dimBlock = { kernel_settings.x_thread_count, kernel_settings.y_thread_count ,1 };
 	kernel_settings.dimGrid = { 1, 1 ,1 };
 
@@ -135,8 +123,8 @@ int main(int argc, char* argv[])
 	// VYTVOR ARCHITEKTURU NEURONOVE SITE
 	// TODO VETSI VELIKOST 
 	create_dense(tc, 2, ActivationFunction::NONE, LayerLogicalType::INPUT);
-	create_dense(tc, 300, ActivationFunction::RELU, LayerLogicalType::OTHER);
-	create_dense(tc, 300, ActivationFunction::RELU, LayerLogicalType::OTHER);
+	//create_dense(tc, 300, ActivationFunction::RELU, LayerLogicalType::OTHER);
+	create_dense(tc, 8, ActivationFunction::RELU, LayerLogicalType::OTHER);
 	create_dense(tc, 1, ActivationFunction::SIGMOID, LayerLogicalType::OUTPUT);
 
 	build_network(tc);
@@ -147,7 +135,7 @@ int main(int argc, char* argv[])
 
 
 	// HLAVNI TRENOVACI SMYCKA
-	train(tc, learning_rate, false);
+	train(tc, false);
 
 	cout << "That is all ..." << endl;
 }

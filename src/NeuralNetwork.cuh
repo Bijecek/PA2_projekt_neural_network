@@ -17,13 +17,13 @@ struct KernelSettings {
 };
 
 struct TrainingContext {
-	int input_size;
+	int num_samples;
 	int input_dim;
-	int output_size;
 	int output_dim;
 	int hidden_size;
 	int num_hidden;
 	int n_of_iterations;
+	float learning_rate;
 
 	float* d_input = nullptr;
 	float* d_target = nullptr;
@@ -35,8 +35,6 @@ struct TrainingContext {
 	KernelSettings kernel_settings;
 };
 
-__constant__ int num_samples;
-__constant__ float learning_rate;
 
 extern std::vector<std::pair<int, ActivationFunction>> layer_specifications;
 
@@ -49,7 +47,7 @@ __device__ float (*derivate_activation_functions[2])(float) = { derivate_relu, d
 
 void setNumSamplesConstant(int input_size);
 
-void setLearningRateConstant(int learning_rate);
+void setLearningRateConstant(float learning_rate);
 
 __global__ void forward(const float* __restrict__ input_data, int input_size, const float* __restrict__ weight_matrix, const float* __restrict__ bias, float* __restrict__ output_data, int output_size, int activation_type);
 

@@ -3,13 +3,16 @@
 using std::cout;
 using std::endl;
 
+__constant__ int num_samples;
+__constant__ float learning_rate;
+
 std::vector<std::pair<int, ActivationFunction>> layer_specifications;
 
 
 void setNumSamplesConstant(int input_size) {
 	checkCudaErrors(cudaMemcpyToSymbol((const void*)&num_samples, &input_size, sizeof(int)));
 }
-void setLearningRateConstant(int learning_r) {
+void setLearningRateConstant(float learning_r) {
 	checkCudaErrors(cudaMemcpyToSymbol((const void*)&learning_rate, &learning_r, sizeof(float)));
 }
 
@@ -68,7 +71,7 @@ __global__ void compute_loss(float* y_predicted, float* y_true, float* loss, int
 		}
 	}
 }
-
+// Výpoèet gradientu - derivace BCE loss (y_pred je po sigmoidu)
 __global__ void compute_gradient(float* y_pred, float* y_true, float* gradient, int size) {
 	int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -108,7 +111,7 @@ __global__ void update_parameters(float* input, float* gradient, float* weight_m
 
 	if (sample_id < num_samples && neuron_id < output_size) {
 		// Learning rate
-		float learning_rate = 0.01f;
+		//float learning_rate = 0.01f;
 
 
 		// Get the gradient for the current sample and output neuron
@@ -136,7 +139,7 @@ void forward_phase(TrainingContext& tc, bool enable_logging) {
 		// Nastavení rozmìrù gridu - dynamicky ho upravujeme podle rozmìrù <input_size; layers[i].out>
 
 		// (4 + 16 - 1) / 16
-		unsigned int x_grid_dim = (tc.input_size + tc.kernel_settings.x_thread_count - 1) / tc.kernel_settings.x_thread_count;
+		unsigned int x_grid_dim = (tc.num_samples + tc.kernel_settings.x_thread_count - 1) / tc.kernel_settings.x_thread_count;
 		// (20 + 16 - 1) / 16
 		unsigned int y_grid_dim = (tc.layers[i].out + tc.kernel_settings.y_thread_count - 1) / tc.kernel_settings.y_thread_count;
 
@@ -150,8 +153,8 @@ void forward_phase(TrainingContext& tc, bool enable_logging) {
 
 		// LOGOVANI
 		if (enable_logging) {
-			checkDeviceMatrix<float>(current_layer.activations, tc.input_size * current_layer.out * sizeof(float), 1,
-				tc.input_size * current_layer.out, "%f ", "Before: ");
+			checkDeviceMatrix<float>(current_layer.activations, tc.num_samples * current_layer.out * sizeof(float), 1,
+				tc.num_samples * current_layer.out, "%f ", "Before: ");
 		}
 
 		forward << <tc.kernel_settings.dimGrid, tc.kernel_settings.dimBlock >> > (current_input, current_layer.in, current_layer.weights,
@@ -163,15 +166,15 @@ void forward_phase(TrainingContext& tc, bool enable_logging) {
 
 		// LOGOVANI
 		if (enable_logging) {
-			checkDeviceMatrix<float>(current_layer.activations, tc.input_size * current_layer.out * sizeof(float), 1,
-				tc.input_size * current_layer.out, "%f ", "After: ");
+			checkDeviceMatrix<float>(current_layer.activations, tc.num_samples * current_layer.out * sizeof(float), 1,
+				tc.num_samples * current_layer.out, "%f ", "After: ");
 		}
 	}
 
 	// LOGOVANI - vypis výstupu poslední vrstvy pro všechny vstupy
 	
-	checkDeviceMatrix<float>(tc.layers[tc.layers.size() - 1].activations, tc.input_size * tc.layers[tc.layers.size() - 1].out *
-			sizeof(float), 1, tc.input_size * tc.layers[tc.layers.size() - 1].out, "%f ", "Activations: ");
+	checkDeviceMatrix<float>(tc.layers[tc.layers.size() - 1].activations, tc.num_samples * tc.layers[tc.layers.size() - 1].out *
+			sizeof(float), 1, tc.num_samples * tc.layers[tc.layers.size() - 1].out, "%f ", "Activations: ");
 	
 
 	if (enable_logging) {
@@ -196,7 +199,7 @@ void loss_and_gradient_phase(TrainingContext& tc, int iteration, bool enable_log
 
 
 	// Poèítání loss -- jako vstup je output z pøedposlední do poslední vrstvy (proto size() - 1)
-	compute_loss << <tc.kernel_settings.dimGrid, tc.kernel_settings.dimBlock >> > (tc.layers[tc.layers.size() - 1].activations, tc.d_target, tc.d_loss, tc.output_size * tc.output_dim);
+	compute_loss << <tc.kernel_settings.dimGrid, tc.kernel_settings.dimBlock >> > (tc.layers[tc.layers.size() - 1].activations, tc.d_target, tc.d_loss, tc.num_samples * tc.output_dim);
 
 	// Pøesun celkové loss zpátky na host 
 	if (enable_logging) {
@@ -212,11 +215,11 @@ void loss_and_gradient_phase(TrainingContext& tc, int iteration, bool enable_log
 		std::cout << "Loss ok" << std::endl;
 	}
 
-	compute_gradient << <tc.kernel_settings.dimGrid, tc.kernel_settings.dimBlock >> > (tc.layers[tc.layers.size() - 1].activations, tc.d_target, tc.d_gradient, tc.output_size * tc.output_dim);
+	compute_gradient << <tc.kernel_settings.dimGrid, tc.kernel_settings.dimBlock >> > (tc.layers[tc.layers.size() - 1].activations, tc.d_target, tc.d_gradient, tc.num_samples * tc.output_dim);
 	
 	// LOGOVANI
 	if (enable_logging) {
-		checkDeviceMatrix<float>(tc.d_gradient, tc.output_size * tc.output_dim * sizeof(float), 1, tc.output_size * tc.output_dim, "%f ", "Gradient: ");
+		checkDeviceMatrix<float>(tc.d_gradient, tc.num_samples * tc.output_dim * sizeof(float), 1, tc.num_samples * tc.output_dim, "%f ", "Gradient: ");
 	}
 }
 
@@ -238,7 +241,7 @@ void backward_phase(TrainingContext& tc, bool enable_logging) {
 
 		// (4 + 16 - 1) / 16
 		// (20 + 16 - 1) / 16
-		unsigned int x_grid_dim = (tc.input_size + tc.kernel_settings.x_thread_count - 1) / tc.kernel_settings.x_thread_count;
+		unsigned int x_grid_dim = (tc.num_samples + tc.kernel_settings.x_thread_count - 1) / tc.kernel_settings.x_thread_count;
 		unsigned int y_grid_dim = (tc.layers[i].out + tc.kernel_settings.y_thread_count - 1) / tc.kernel_settings.y_thread_count;
 
 		tc.kernel_settings.dimGrid.x = x_grid_dim;
@@ -261,10 +264,9 @@ void backward_phase(TrainingContext& tc, bool enable_logging) {
 		}
 
 
-
-
-		// LOGOVANI
-		//checkDeviceMatrix<float>(layers[i].gradients, input_size * layers[i].out * sizeof(float), 1, input_size * layers[i].out, "%f ", "Gradient calc: ");
+		if (enable_logging) {
+			checkDeviceMatrix<float>(tc.layers[i].gradients, tc.num_samples * tc.layers[i].out * sizeof(float), 1, tc.num_samples * tc.layers[i].out, "%f ", "Gradient calc: ");
+		}
 
 
 		// AKTUALIZACE VAH
