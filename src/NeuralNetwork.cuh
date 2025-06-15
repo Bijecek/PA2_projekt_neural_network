@@ -32,8 +32,11 @@ struct TrainingContext {
 	float* d_gradient = nullptr;
 	float* d_loss = nullptr;
 	float* d_accuracy = nullptr;
+	float* d_tp = nullptr;
+	float* d_fp = nullptr;
+	float* d_fn = nullptr;
 
-	std::vector<float> batch_loss, batch_accuracy;
+	std::vector<float> batch_loss, batch_accuracy, batch_f1;
 
 	std::vector<Layer> layers;
 	Dataset dataset;
@@ -56,16 +59,16 @@ void setLearningRateConstant(float learning_rate);
 
 __global__ void forward(const float* __restrict__ input_data, int input_size, const float* __restrict__ weight_matrix, const float* __restrict__ bias, float* __restrict__ output_data, int output_size, int activation_type);
 
-__global__ void compute_loss(float* y_predicted, float* y_true, float* loss, int size);
+__global__ void compute_loss(const float* __restrict__ y_predicted, const float* __restrict__ y_true, float* loss, const int size);
 
-__global__ void compute_gradient(float* y_pred, float* y_true, float* gradient, int size, float* accuracy);
+__global__ void compute_gradient(float* y_pred, float* y_true, float* gradient, int size, float* accuracy, float* d_tp, float* d_fp, float* d_fn);
 
 __global__ void backward(float* activations, int input_size, float* weight_matrix, bool first, float* gradient_in
 	, float* gradient_out, int output_size, int next_out_size, int activation_type);
 
 __global__ void update_parameters(float* input, float* gradient, float* weight_matrix, float* biases, int input_size, int output_size);
 
-void forward_phase(TrainingContext& tc, bool enable_logging);
+void forward_phase(TrainingContext& tc, bool enable_logging, bool enable_results, int actual_batch_size, std::vector<float> target_data);
 
 void loss_and_gradient_phase(TrainingContext& tc, int iteration, int actual_batch_size, bool enable_logging);
 

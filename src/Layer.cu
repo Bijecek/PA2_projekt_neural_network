@@ -22,14 +22,8 @@ Layer createDropoutLayer(int size, float rate) {
     layer.activation = ActivationFunction::NONE;
     layer.in = size;
     layer.out = size;
-
-    layer.weights = nullptr;
-    layer.biases = nullptr;
-
-    layer.activations = new float[size];
-    layer.gradients = new float[size];
     layer.dropout_rate = rate;
-    layer.mask = new bool[size];
+
     return layer;
 }
 
@@ -57,7 +51,7 @@ void initLayer(Layer& layer, int input_size) {
         checkCudaErrors(cudaMemcpy(layer.weights, temporary_weights.data(), layer.in * layer.out * sizeof(float), cudaMemcpyHostToDevice));
         checkCudaErrors(cudaMemcpy(layer.biases, temporary_biases.data(), layer.out * sizeof(float), cudaMemcpyHostToDevice));
     }
-    else {
+    else if(layer.type == LayerType::DROPOUT) {
         checkCudaErrors(cudaMalloc(&layer.activations, input_size * layer.out * sizeof(float)));
         checkCudaErrors(cudaMalloc(&layer.gradients, input_size * layer.out * sizeof(float)));
         checkCudaErrors(cudaMalloc(&layer.mask, input_size * layer.out * sizeof(bool)));

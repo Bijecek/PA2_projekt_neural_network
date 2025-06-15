@@ -20,4 +20,4 @@ extern Dataset dataset5;
 
 Dataset getDatasetByName(std::string name);
 Dataset load_dataset(std::string name);
-Dataset get_batch(const Dataset& data, int batch_size, int batch_index);
+Dataset get_batch(const Dataset& data, int batch_size, int batch_index, std::vector<int> indexes);

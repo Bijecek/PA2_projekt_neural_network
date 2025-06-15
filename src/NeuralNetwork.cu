@@ -37,7 +37,7 @@ __global__ void forward(const float* __restrict__ input_data, int input_size, co
 }
 
 //256 velikost -> pracuju s 128 THREADS_PER_BLOCK
-__global__ void compute_loss(float* y_predicted, float* y_true, float* loss, int size) {
+__global__ void compute_loss(const float* __restrict__ y_predicted, const float* __restrict__ y_true, float* loss, const int size) {
 	__shared__ float s_loss[THREADS_PER_BLOCK];
 
 	int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -46,12 +46,11 @@ __global__ void compute_loss(float* y_predicted, float* y_true, float* loss, int
 
 	float epsilon = 1e-7;
 
-	// TODO SIZE/2
 	if (idx < size) {
-		s_loss[idx] = -y_true[idx] * logf(fmax(y_predicted[idx], epsilon));
+		s_loss[idx] = -y_true[idx] * logf(fmax(y_predicted[idx], epsilon)) - (1.0f - y_true[idx]) * logf(fmax(1.0f - y_predicted[idx], epsilon));;
 		__syncthreads();
 
-		if (idx + next > size) {
+		if (idx + next >= size) {
 			return;
 		}
 
@@ -62,8 +61,8 @@ __global__ void compute_loss(float* y_predicted, float* y_true, float* loss, int
 
 			next >>= 1;
 
-			if (idx > next) {
-				return;
+			if (idx >= next) {
+				break;
 			}
 		}
 		if (idx == 0) {
@@ -72,21 +71,30 @@ __global__ void compute_loss(float* y_predicted, float* y_true, float* loss, int
 	}
 }
 // Výpoèet gradientu - derivace BCE loss (y_pred je po sigmoidu)
-__global__ void compute_gradient(float* y_pred, float* y_true, float* gradient, int size, float* accuracy) {
+__global__ void compute_gradient(float* y_pred, float* y_true, float* gradient, int size, float* accuracy, float* d_tp, float* d_fp, float* d_fn) {
 	int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
 	if (idx < size) {
 		gradient[idx] = y_pred[idx] - y_true[idx];
 
 		if ((y_pred[idx] >= 0.5f && y_true[idx] == 1.0f) || (y_pred[idx] < 0.5f && y_true[idx] == 0.0f)) {
-			atomicAdd(accuracy, 1.0);
+			atomicAdd(accuracy, 1.0f);
 		}
 
-		// Poèkej na všechny vlákna
-		//__syncthreads();
-
-		//if (idx == 0) *accuracy /= size;
-
+		// Calculate confusion matrix
+		if (y_true[idx] == 1.0f) {
+			if (y_pred[idx] >= 0.5f) {
+				atomicAdd(d_tp, 1.0f);
+			}
+			else {
+				atomicAdd(d_fn, 1.0f);
+			}
+		}
+		else {
+			if (y_pred[idx] >= 0.5f) {
+				atomicAdd(d_fp, 1.0f);
+			}
+		}
 
 	}
 }
@@ -142,7 +150,7 @@ __global__ void update_parameters(float* input, float* gradient, float* weight_m
 }
 
 // Forward fáze
-void forward_phase(TrainingContext& tc, bool enable_logging) {
+void forward_phase(TrainingContext& tc, bool enable_logging, bool enable_results, int actual_batch_size, std::vector<float> target_data) {
 	float* current_input = tc.d_input;
 	for (int i = 0; i < tc.layers.size(); i++) {
 		Layer& current_layer = tc.layers[i];
@@ -183,10 +191,14 @@ void forward_phase(TrainingContext& tc, bool enable_logging) {
 	}
 
 	// LOGOVANI - vypis výstupu poslední vrstvy pro všechny vstupy
-	
-	if (enable_logging) {
-		checkDeviceMatrix<float>(tc.layers[tc.layers.size() - 1].activations, tc.batch_size * tc.layers[tc.layers.size() - 1].out *
-			sizeof(float), 1, tc.batch_size * tc.layers[tc.layers.size() - 1].out, "%f ", "Activations: ");
+	if (enable_results || enable_logging) {
+		cout << "Expected values: " << endl;
+		for (int i = 0; i < target_data.size(); i++) {
+			cout << target_data[i] << " ";
+		}
+		cout << endl;
+		checkDeviceMatrix<float>(tc.layers[tc.layers.size() - 1].activations, actual_batch_size * tc.layers[tc.layers.size() - 1].out *
+			sizeof(float), 1, actual_batch_size * tc.layers[tc.layers.size() - 1].out, "%f ", "Activations: ");
 	}
 
 	if (enable_logging) {
@@ -212,7 +224,7 @@ void loss_and_gradient_phase(TrainingContext& tc, int iteration, int actual_batc
 
 
 	// Poèítání loss -- jako vstup je output z pøedposlední do poslední vrstvy (proto size() - 1)
-	compute_loss << <tc.kernel_settings.dimGrid, tc.kernel_settings.dimBlock >> > (tc.layers[tc.layers.size() - 1].activations, tc.d_target, tc.d_loss, tc.batch_size * tc.output_dim);
+	compute_loss << <tc.kernel_settings.dimGrid, tc.kernel_settings.dimBlock >> > (tc.layers[tc.layers.size() - 1].activations, tc.d_target, tc.d_loss, actual_batch_size * tc.output_dim);
 
 	// Pøesun celkové loss zpátky na host 
 	if (enable_logging) {
@@ -223,10 +235,12 @@ void loss_and_gradient_phase(TrainingContext& tc, int iteration, int actual_batc
 	checkCudaErrors(cudaMemcpy(&tmp_loss, tc.d_loss, sizeof(float), cudaMemcpyDeviceToHost));
 
 	// Batch loss pole
-	tc.batch_loss.push_back(tmp_loss * actual_batch_size);
+	tc.batch_loss.push_back(tmp_loss);
+	
 
 
-	compute_gradient << <tc.kernel_settings.dimGrid, tc.kernel_settings.dimBlock >> > (tc.layers[tc.layers.size() - 1].activations, tc.d_target, tc.d_gradient, tc.batch_size * tc.output_dim, tc.d_accuracy);
+	compute_gradient << <tc.kernel_settings.dimGrid, tc.kernel_settings.dimBlock >> > (tc.layers[tc.layers.size() - 1].activations, 
+		tc.d_target, tc.d_gradient, actual_batch_size * tc.output_dim, tc.d_accuracy, tc.d_tp, tc.d_fp, tc.d_fn);
 	
 	float tmp_accuracy;
 	checkCudaErrors(cudaMemcpy(&tmp_accuracy, tc.d_accuracy, sizeof(float), cudaMemcpyDeviceToHost));
@@ -234,8 +248,14 @@ void loss_and_gradient_phase(TrainingContext& tc, int iteration, int actual_batc
 	// Batch accuracy pole
 	tc.batch_accuracy.push_back(tmp_accuracy);
 
+	//cout << "Current batch Loss: " << tmp_loss << endl;
+	//cout << "Current batch Accuracy: " << tmp_accuracy << endl;
+
 	// LOGOVANI
 	if (enable_logging) {
+		cout << "Current batch Loss: " << tmp_loss << endl;
+		cout << "Current batch Accuracy: " << tmp_accuracy << endl;
+
 		checkDeviceMatrix<float>(tc.d_gradient, tc.batch_size * tc.output_dim * sizeof(float), 1, tc.batch_size * tc.output_dim, "%f ", "Gradient: ");
 	}
 }
