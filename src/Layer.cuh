@@ -15,6 +15,11 @@ enum class ActivationFunction {
 	NONE
 };
 
+enum class LayerLogicalType {
+	INPUT,
+	OUTPUT,
+	OTHER
+};
 struct Layer {
 	LayerType type;
 	ActivationFunction activation;
@@ -24,12 +29,15 @@ struct Layer {
 	float* biases;
 	float* activations;
 	float* gradients;
-	float dropout_rate; // pravdìpodobnost dropout
-	bool* mask; // maska pro dropout (1 = neuron aktivní, 0 = vypnutý)
+
+	// Dropout parametry
+	float dropout_rate = 0.0f;
+	bool* mask = nullptr;
 };
 
 Layer createDenseLayer(int in_size, int out_size, ActivationFunction act);
 
-Layer createDropoutLayer(int size, float rate);
-
 void initLayer(Layer& layer, int input_size);
+
+std::string getActivationFunction(ActivationFunction af);
+std::string getLayerType(LayerType type);

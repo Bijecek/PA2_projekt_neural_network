@@ -16,23 +16,6 @@ Layer createDenseLayer(int in_size, int out_size, ActivationFunction act) {
     return layer;
 }
 
-Layer createDropoutLayer(int size, float rate) {
-    Layer layer;
-    layer.type = LayerType::DROPOUT;
-    layer.activation = ActivationFunction::NONE;
-    layer.in = size;
-    layer.out = size;
-
-    layer.weights = nullptr;
-    layer.biases = nullptr;
-
-    layer.activations = new float[size];
-    layer.gradients = new float[size];
-    layer.dropout_rate = rate;
-    layer.mask = new bool[size];
-    return layer;
-}
-
 void initLayer(Layer& layer, int input_size) {
 
     if (layer.type == LayerType::DENSE) {
@@ -44,7 +27,8 @@ void initLayer(Layer& layer, int input_size) {
 
         // Náhodné naplnění vah
         std::mt19937 gen(42);
-        std::uniform_real_distribution<float> dist(-1.0, 1.0f);
+        //std::uniform_real_distribution<float> dist(-1.0, 1.0f);
+        std::uniform_real_distribution<float> dist(-0.2, 0.2f);
 
         std::vector<float> temporary_weights(layer.in * layer.out);
         std::vector<float> temporary_biases(layer.out);
@@ -55,10 +39,31 @@ void initLayer(Layer& layer, int input_size) {
         // Kopírování na GPU
         checkCudaErrors(cudaMemcpy(layer.weights, temporary_weights.data(), layer.in * layer.out * sizeof(float), cudaMemcpyHostToDevice));
         checkCudaErrors(cudaMemcpy(layer.biases, temporary_biases.data(), layer.out * sizeof(float), cudaMemcpyHostToDevice));
+
+        if (layer.dropout_rate > 0.0f) {
+            checkCudaErrors(cudaMalloc(&layer.mask, input_size * layer.out * sizeof(bool)));
+        }
     }
-    else {
-        checkCudaErrors(cudaMalloc(&layer.activations, input_size * layer.out * sizeof(float)));
-        checkCudaErrors(cudaMalloc(&layer.gradients, input_size * layer.out * sizeof(float)));
-        checkCudaErrors(cudaMalloc(&layer.mask, input_size * layer.out * sizeof(bool)));
+}
+std::string getActivationFunction(ActivationFunction af) {
+    switch (af) {
+    case ActivationFunction::RELU:
+        return "ReLU";
+    case ActivationFunction::SIGMOID:
+        return "Sigmoid";
+    case ActivationFunction::NONE:
+        return "None";
+    default:
+        return "Unknown";
+    }
+}
+std::string getLayerType(LayerType type) {
+    switch (type) {
+    case LayerType::DENSE:
+        return "DENSE";
+    case LayerType::DROPOUT:
+        return "DROPOUT";
+    default:
+        return "Unknown";
     }
 }

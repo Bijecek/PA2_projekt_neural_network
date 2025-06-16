@@ -4,6 +4,8 @@
 #include <random>
 #include <algorithm>
 #include <iostream>
+#include <curand_kernel.h>
+#include <tuple>
 
 #include "Datasets.cuh"
 #include "ActivationFunctions.cuh"
@@ -17,27 +19,41 @@ struct KernelSettings {
 };
 
 struct TrainingContext {
-	int input_size;
+	int num_samples;
 	int input_dim;
-	int output_size;
 	int output_dim;
-	int hidden_size;
-	int num_hidden;
 	int n_of_iterations;
+	float learning_rate;
+	int batch_size;
+	int total_batch_count;
 
 	float* d_input = nullptr;
 	float* d_target = nullptr;
 	float* d_gradient = nullptr;
 	float* d_loss = nullptr;
+	float* d_accuracy = nullptr;
+	float* d_tp = nullptr;
+	float* d_fp = nullptr;
+	float* d_fn = nullptr;
+
+	curandState* d_curand_state;
+
+	std::vector<float> batch_loss, batch_accuracy, batch_f1;
 
 	std::vector<Layer> layers;
 	Dataset dataset;
 	KernelSettings kernel_settings;
 };
 
-__constant__ int num_samples;
+struct OneLayer {
+	int neurons;
+	ActivationFunction act;
+	LayerType type;
+	float rate;
+};
+extern std::vector<OneLayer> layer_specifications;
 
-constexpr unsigned int THREADS_PER_BLOCK = 128;
+constexpr unsigned int THREADS_PER_BLOCK = 1028;
 
 // Pole pointerù na aktivaèní funkce
 __device__ float (*activation_functions[2])(float) = { convert_relu, convert_sigmoid};
@@ -46,20 +62,24 @@ __device__ float (*derivate_activation_functions[2])(float) = { derivate_relu, d
 
 void setNumSamplesConstant(int input_size);
 
+void setLearningRateConstant(float learning_rate);
+
 __global__ void forward(const float* __restrict__ input_data, int input_size, const float* __restrict__ weight_matrix, const float* __restrict__ bias, float* __restrict__ output_data, int output_size, int activation_type);
 
-__global__ void compute_loss(float* y_predicted, float* y_true, float* loss, int size);
+__global__ void dropout_forward(float* input, float* output, bool* mask, float dropout_rate, int size, curandState* curand_state);
 
-__global__ void compute_gradient(float* y_pred, float* y_true, float* gradient, int size);
+__global__ void compute_loss(const float* __restrict__ y_predicted, const float* __restrict__ y_true, float* loss, const int size);
 
-__global__ void backward(float* input, float* activations, int input_size, float* weight_matrix, bool first, float* gradient_in
-	, float* gradient_out, int output_size, int next_out_size, int activation_type);
+__global__ void compute_gradient(float* y_pred, float* y_true, float* gradient, const int size, float* accuracy, float* d_tp, float* d_fp, float* d_fn);
+
+__global__ void backward(float* activations, int input_size, float* weight_matrix, bool first, float* gradient_in
+	, float* gradient_out, int output_size, int next_out_size, int activation_type, bool* dropout_mask, float dropout_rate);
 
 __global__ void update_parameters(float* input, float* gradient, float* weight_matrix, float* biases, int input_size, int output_size);
 
-void forward_phase(TrainingContext& tc);
+void forward_phase(TrainingContext& tc, bool enable_logging, bool enable_results, int actual_batch_size, std::vector<float> target_data);
 
-void loss_and_gradient_phase(TrainingContext& tc, int iteration);
+void loss_and_gradient_phase(TrainingContext& tc, int iteration, int actual_batch_size, bool enable_logging);
 
-void backward_phase(TrainingContext& tc);
+void backward_phase(TrainingContext& tc, bool enable_logging);
 
