@@ -90,15 +90,12 @@ void reset_print_statistics(TrainingContext& tc, int iteration) {
 		batch_accuracy += tc.batch_accuracy[i];
 		batch_f1 += tc.batch_f1[i];
 	}
-	if (batch_accuracy > tc.dataset.target.size()) {
-		cout << "AA" << endl;
-	}
 
 
-	//batch_loss /= tc.dataset.target.size();
 	batch_accuracy /= tc.num_samples;
 	batch_f1 /= tc.total_batch_count;
-	// VYPSANI CELKOVE categorical crossentropy LOSS
+	
+
 	cout << "Iteration: " << iteration << " -- batch loss: " << batch_loss << " Batch accuracy: " << batch_accuracy << " Batch F1: " << batch_f1 <<std::endl;
 
 	// Resetuj batch pole
@@ -116,7 +113,6 @@ void handle_f1_calculation(TrainingContext& tc) {
 	cudaMemcpy(&h_fp, tc.d_fp, sizeof(float), cudaMemcpyDeviceToHost);
 	cudaMemcpy(&h_fn, tc.d_fn, sizeof(float), cudaMemcpyDeviceToHost);
 
-	cout << h_tp << " " << h_fp << " " << h_fn << endl;
 
 	// Vypočítání F1 score
 	float precision = h_tp / (h_tp + h_fp + 1e-7f);
@@ -135,10 +131,6 @@ void handle_f1_calculation(TrainingContext& tc) {
 }
 
 void train(TrainingContext& tc, bool enable_logging, bool enable_results) {
-	//float* d_calculated_loss;
-	//checkCudaErrors(cudaMalloc(&d_calculated_loss, sizeof(float)));
-
-
 	setNumSamplesConstant(tc.batch_size);
 
 	setLearningRateConstant(tc.learning_rate);
@@ -159,12 +151,11 @@ void train(TrainingContext& tc, bool enable_logging, bool enable_results) {
 	checkCudaErrors(cudaMalloc(&tc.d_fp, sizeof(float)));
 	checkCudaErrors(cudaMalloc(&tc.d_fn, sizeof(float)));
 
-	// Pomocné pole pro shuffling jednotlivlivých dávek
+	// Pomocné pole pro shuffling jednotlivých dávek
 	std::vector<int> indexes;
 	for (int i = 0; i < tc.dataset.target.size(); i++) {
 		indexes.push_back(i);
 	}
-	//shuffle_indexes(indexes, 0);
 
 	//******************************************************************************************|
 	//								         MAIN TRAINING LOOP						            |					
@@ -176,8 +167,7 @@ void train(TrainingContext& tc, bool enable_logging, bool enable_results) {
 
 		for (int batch_id = 0; batch_id < tc.total_batch_count; batch_id++) {
 
-			// Resetovani loss
-			//checkCudaErrors(cudaMemset(d_calculated_loss, 0.0, sizeof(float)));
+			// Resetování proměnných
 			checkCudaErrors(cudaMemset(tc.d_accuracy, 0.0, sizeof(float)));
 			checkCudaErrors(cudaMemset(tc.d_tp, 0, sizeof(float)));
 			checkCudaErrors(cudaMemset(tc.d_fp, 0, sizeof(float)));
@@ -210,6 +200,15 @@ void train(TrainingContext& tc, bool enable_logging, bool enable_results) {
 		reset_print_statistics(tc, iteration);
 
 	}
+
+	cudaFree(tc.d_accuracy);
+	cudaFree(tc.d_fn);
+	cudaFree(tc.d_fp);
+	cudaFree(tc.d_gradient);
+	cudaFree(tc.d_input);
+	cudaFree(tc.d_loss);
+	cudaFree(tc.d_target);
+	cudaFree(tc.d_tp);
 }
 
 void run_dataset1(TrainingContext& tc) {
@@ -251,8 +250,8 @@ void run_dataset4(TrainingContext& tc) {
 	tc.batch_size = 128;
 
 	create_dense(tc, tc.dataset.dimensions, ActivationFunction::NONE, LayerLogicalType::INPUT);
-	create_dense(tc, 50, ActivationFunction::RELU, LayerLogicalType::OTHER);
-	create_dense(tc, 50, ActivationFunction::RELU, LayerLogicalType::OTHER);
+	create_dense(tc, 290, ActivationFunction::RELU, LayerLogicalType::OTHER);
+	create_dense(tc, 390, ActivationFunction::RELU, LayerLogicalType::OTHER);
 	create_dense(tc, 1, ActivationFunction::SIGMOID, LayerLogicalType::OUTPUT);
 }
 
@@ -274,7 +273,6 @@ int main(int argc, char* argv[])
 
 	TrainingContext tc;
 	
-	//tc.dataset = getDatasetByName("dataset3");
 	tc.num_samples = tc.dataset.target.size();
 
 
@@ -286,9 +284,7 @@ int main(int argc, char* argv[])
 
 	tc.kernel_settings = kernel_settings;
 
-	// VYTVOR ARCHITEKTURU NEURONOVE SITE
-	//run_dataset1(tc);
-	run_dataset1_dropout(tc);
+	run_dataset4(tc);
 	tc.num_samples = tc.dataset.target.size();
 
 	build_network(tc);
@@ -297,7 +293,7 @@ int main(int argc, char* argv[])
 	allocate_input_data(tc);
 
 	// HLAVNI TRENOVACI SMYCKA
-	train(tc, false, true);
+	train(tc, false, false);
 
 	cout << "That is all ..." << endl;
 }

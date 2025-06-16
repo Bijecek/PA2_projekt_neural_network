@@ -22,8 +22,6 @@ struct TrainingContext {
 	int num_samples;
 	int input_dim;
 	int output_dim;
-	int hidden_size;
-	int num_hidden;
 	int n_of_iterations;
 	float learning_rate;
 	int batch_size;
@@ -72,12 +70,10 @@ __global__ void dropout_forward(float* input, float* output, bool* mask, float d
 
 __global__ void compute_loss(const float* __restrict__ y_predicted, const float* __restrict__ y_true, float* loss, const int size);
 
-__global__ void compute_gradient(float* y_pred, float* y_true, float* gradient, int size, float* accuracy, float* d_tp, float* d_fp, float* d_fn);
+__global__ void compute_gradient(float* y_pred, float* y_true, float* gradient, const int size, float* accuracy, float* d_tp, float* d_fp, float* d_fn);
 
 __global__ void backward(float* activations, int input_size, float* weight_matrix, bool first, float* gradient_in
 	, float* gradient_out, int output_size, int next_out_size, int activation_type, bool* dropout_mask, float dropout_rate);
-
-__global__ void dropout_backward(float* gradient_in, float* gradient_out, int output_size, bool* mask);
 
 __global__ void update_parameters(float* input, float* gradient, float* weight_matrix, float* biases, int input_size, int output_size);
 

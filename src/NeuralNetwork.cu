@@ -35,7 +35,7 @@ __global__ void forward(const float* __restrict__ input_data, int input_size, co
 
 	}
 }
-__global__ void dropout_forward(float* input, float* output, bool* mask, float dropout_rate, int size, curandState* curand_state) {
+__global__ void dropout_forward(float* input, float* output, bool* mask, float dropout_rate, const int size, curandState* curand_state) {
 	int sample_id = blockIdx.x * blockDim.x + threadIdx.x;
 	int neuron_id = blockIdx.y * blockDim.y + threadIdx.y;
 	
@@ -52,8 +52,7 @@ __global__ void dropout_forward(float* input, float* output, bool* mask, float d
 		output[sample_id * size + neuron_id] = mask[sample_id * size + neuron_id] ? input[sample_id * size + neuron_id] : 0.0f;
 	}
 }
-
-//256 velikost -> pracuju s 128 THREADS_PER_BLOCK
+// Výpoèet ztrátové funkce
 __global__ void compute_loss(const float* __restrict__ y_predicted, const float* __restrict__ y_true, float* loss, const int size) {
 	__shared__ float s_loss[THREADS_PER_BLOCK];
 
@@ -94,23 +93,18 @@ __global__ void compute_gradient(float* y_pred, float* y_true, float* gradient, 
 	if (idx < size) {
 		gradient[idx] = y_pred[idx] - y_true[idx];
 
-		if ((y_pred[idx] >= 0.5f && y_true[idx] == 1.0f) || (y_pred[idx] < 0.5f && y_true[idx] == 0.0f)) {
-			atomicAdd(accuracy, 1.0f);
-		}
+		float pred = y_pred[idx] >= 0.5f ? 1.0f : 0.0f;
+		float true_val = y_true[idx];
+
+		atomicAdd(accuracy, pred == true_val ? 1.0f : 0.0f);
 
 		// Calculate confusion matrix
 		if (y_true[idx] == 1.0f) {
-			if (y_pred[idx] >= 0.5f) {
-				atomicAdd(d_tp, 1.0f);
-			}
-			else {
-				atomicAdd(d_fn, 1.0f);
-			}
+			atomicAdd(d_tp, pred == 1.0f ? 1.0f : 0.0f);
+			atomicAdd(d_fn, pred == 0.0f ? 1.0f : 0.0f);
 		}
 		else {
-			if (y_pred[idx] >= 0.5f) {
-				atomicAdd(d_fp, 1.0f);
-			}
+			atomicAdd(d_fp, pred == 1.0f ? 1.0f : 0.0f);
 		}
 
 	}
@@ -145,38 +139,19 @@ __global__ void backward(float* activations, int input_size, float* weight_matri
 		gradient_out[sample_id * output_size + neuron_id] = final_gradient;
 	}
 }
-__global__ void dropout_backward(float* gradient_in, float* gradient_out, int output_size, bool* mask) {
-	int sample_id = blockIdx.x * blockDim.x + threadIdx.x;
-	int neuron_id = blockIdx.y * blockDim.y + threadIdx.y;
-
-	if (sample_id < num_samples && neuron_id < output_size) {
-		gradient_out[sample_id * output_size + neuron_id] = mask[sample_id * output_size + neuron_id] ? gradient_in[sample_id * output_size + neuron_id] : 0.0f;
-	}
-}
 
 // Funkce pro aktualizaci vah a biasu
-// TODO:
-//      Pøepoèítat si zmìnu váhy pro N vzorkù a až potom volat tuhle funkci
 __global__ void update_parameters(float* input, float* gradient, float* weight_matrix, float* biases, int input_size, int output_size) {
 	int sample_id = blockIdx.x * blockDim.x + threadIdx.x;
 	int neuron_id = blockIdx.y * blockDim.y + threadIdx.y;
 
 	if (sample_id < num_samples && neuron_id < output_size) {
-		// Learning rate
-		//float learning_rate = 0.01f;
-
-
-		// Get the gradient for the current sample and output neuron
 		float grad = gradient[sample_id * output_size + neuron_id];
 
-		// Update each weight for this output neuron
 		for (int i = 0; i < input_size; i++) {
-			// weight_matrix is [output_size][input_size]
 			atomicAdd(&weight_matrix[neuron_id * input_size + i], -learning_rate * input[sample_id * input_size + i] * grad);
 
 		}
-
-		// Update bias
 		atomicAdd(&biases[neuron_id], -learning_rate * grad);
 
 	}
@@ -233,18 +208,22 @@ void forward_phase(TrainingContext& tc, bool enable_logging, bool enable_results
 		}
 	}
 
-	// LOGOVANI - vypis výstupu poslední vrstvy pro všechny vstupy
+	// LOGOVANI
 	if (enable_results || enable_logging) {
 		cout << "Expected values: " << endl;
 		for (int i = 0; i < target_data.size(); i++) {
 			cout << target_data[i] << " ";
 		}
-		cout << endl;
 		checkDeviceMatrix<float>(tc.layers[tc.layers.size() - 1].activations, actual_batch_size * tc.layers[tc.layers.size() - 1].out *
 			sizeof(float), 1, actual_batch_size * tc.layers[tc.layers.size() - 1].out, "%f ", "Activations: ");
 	}
 
 	if (enable_logging) {
+		cout << "Expected values: " << endl;
+		for (int i = 0; i < target_data.size(); i++) {
+			cout << target_data[i] << " ";
+		}
+		cout << endl;
 		std::cout << "Forward ok" << std::endl;
 	}
 
@@ -255,8 +234,6 @@ void loss_and_gradient_phase(TrainingContext& tc, int iteration, int actual_batc
 	checkCudaErrors(cudaMemset(tc.d_accuracy, 0.0, sizeof(float)));
 
 
-	// TODO Nastavit dle batch_size -- momentálnì je to na 128
-	// S timto pocitame LOSS a GRADIENTy
 	tc.kernel_settings.dimBlock.x = tc.batch_size;
 	tc.kernel_settings.dimBlock.y = 1;
 	tc.kernel_settings.dimBlock.z = 1;
@@ -266,7 +243,7 @@ void loss_and_gradient_phase(TrainingContext& tc, int iteration, int actual_batc
 	tc.kernel_settings.dimGrid.z = 1;
 
 
-	// Poèítání loss -- jako vstup je output z pøedposlední do poslední vrstvy (proto size() - 1)
+	// Poèítání loss
 	compute_loss << <tc.kernel_settings.dimGrid, tc.kernel_settings.dimBlock >> > (tc.layers[tc.layers.size() - 1].activations, tc.d_target, tc.d_loss, actual_batch_size * tc.output_dim);
 
 	// Pøesun celkové loss zpátky na host 
@@ -281,7 +258,6 @@ void loss_and_gradient_phase(TrainingContext& tc, int iteration, int actual_batc
 	tc.batch_loss.push_back(tmp_loss);
 	
 
-
 	compute_gradient << <tc.kernel_settings.dimGrid, tc.kernel_settings.dimBlock >> > (tc.layers[tc.layers.size() - 1].activations, 
 		tc.d_target, tc.d_gradient, actual_batch_size * tc.output_dim, tc.d_accuracy, tc.d_tp, tc.d_fp, tc.d_fn);
 	
@@ -291,8 +267,6 @@ void loss_and_gradient_phase(TrainingContext& tc, int iteration, int actual_batc
 	// Batch accuracy pole
 	tc.batch_accuracy.push_back(tmp_accuracy);
 
-	//cout << "Current batch Loss: " << tmp_loss << endl;
-	//cout << "Current batch Accuracy: " << tmp_accuracy << endl;
 
 	// LOGOVANI
 	if (enable_logging) {
@@ -313,14 +287,12 @@ void backward_phase(TrainingContext& tc, bool enable_logging) {
 		float* activation = tc.layers[i].activations;
 		int in_size = tc.layers[i].in;
 		int out_size = tc.layers[i].out;
+		int next_out_size = (i == tc.layers.size() - 1) ? 0 : tc.layers[i + 1].out;
 		float* weight_matrix = (i == tc.layers.size() - 1) ? nullptr : tc.layers[i + 1].weights;
 		bool first = (i == tc.layers.size() - 1) ? true : false;
 		float* gradient_in = (i == tc.layers.size() - 1) ? tc.d_gradient : tc.layers[i + 1].gradients;
 		float* gradient_out = tc.layers[i].gradients;
 
-
-		// (4 + 16 - 1) / 16
-		// (20 + 16 - 1) / 16
 		unsigned int x_grid_dim = (tc.batch_size + tc.kernel_settings.x_thread_count - 1) / tc.kernel_settings.x_thread_count;
 		unsigned int y_grid_dim = (tc.layers[i].out + tc.kernel_settings.y_thread_count - 1) / tc.kernel_settings.y_thread_count;
 
@@ -328,38 +300,23 @@ void backward_phase(TrainingContext& tc, bool enable_logging) {
 		tc.kernel_settings.dimGrid.y = y_grid_dim;
 		tc.kernel_settings.dimGrid.z = 1;
 
-
 		if (enable_logging) {
 			cout << "Backward kernel executed with: " << x_grid_dim << " " << y_grid_dim << endl;
 		}
 
-
 		if (tc.layers[i].type == LayerType::DENSE) {
-			if (i == tc.layers.size() - 1) {
-				backward << <tc.kernel_settings.dimGrid, tc.kernel_settings.dimBlock >> > (activation, in_size, weight_matrix, first, gradient_in, gradient_out,
-					out_size, 0, static_cast<int>(tc.layers[i].activation), tc.layers[i].mask, tc.layers[i].dropout_rate);
-			}
-			else {
-				backward << <tc.kernel_settings.dimGrid, tc.kernel_settings.dimBlock >> > (activation, in_size, weight_matrix, first, gradient_in, gradient_out,
-					out_size, tc.layers[i + 1].out, static_cast<int>(tc.layers[i].activation), tc.layers[i].mask, tc.layers[i].dropout_rate);
-			}
+			backward << <tc.kernel_settings.dimGrid, tc.kernel_settings.dimBlock >> > (activation, in_size, weight_matrix, first, gradient_in, gradient_out,
+				out_size, next_out_size, static_cast<int>(tc.layers[i].activation), tc.layers[i].mask, tc.layers[i].dropout_rate);
 		}
 	
-
 		if (enable_logging) {
 			checkDeviceMatrix<float>(tc.layers[i].gradients, tc.batch_size * tc.layers[i].out * sizeof(float), 1, tc.batch_size * tc.layers[i].out, "%f ", "Gradient calc: ");
 		}
 
-
-		// AKTUALIZACE VAH
 		float* input_activations = (i == 0) ? tc.d_input : tc.layers[i - 1].activations;
-
-		
 		update_parameters << <tc.kernel_settings.dimGrid, tc.kernel_settings.dimBlock >> > (input_activations, tc.layers[i].gradients, tc.layers[i].weights
 				, tc.layers[i].biases, tc.layers[i].in, tc.layers[i].out);
-		
 
-		
 	}
 
 	if (enable_logging) {
