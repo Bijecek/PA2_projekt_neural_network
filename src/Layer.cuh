@@ -37,8 +37,9 @@ struct Layer {
 
 Layer createDenseLayer(int in_size, int out_size, ActivationFunction act);
 
-Layer createDropoutLayer(int size, float rate);
+Layer createDropoutLayer(int in_size, int out_size, float rate);
 
 void initLayer(Layer& layer, int input_size);
 
 std::string getActivationFunction(ActivationFunction af);
+std::string getLayerType(LayerType type);

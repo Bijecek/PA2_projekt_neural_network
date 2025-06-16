@@ -23,7 +23,7 @@ void allocate_input_data(TrainingContext& tc) {
 void create_input(TrainingContext& tc, int neurons) {
 	tc.input_dim = neurons;
 }
-void create_dense(TrainingContext& tc, int neurons, ActivationFunction act, LayerLogicalType type) {
+void create_dense(TrainingContext& tc, int neurons, ActivationFunction act, LayerLogicalType type, float rate=0.0) {
 	// Pokud se jedná o první vrstvu
 	if (type == LayerLogicalType::INPUT) {
 		// Nastavení vstupní dimenze (počet neuronů vstupu)
@@ -32,19 +32,40 @@ void create_dense(TrainingContext& tc, int neurons, ActivationFunction act, Laye
 	else if(type == LayerLogicalType::OUTPUT){
 		tc.output_dim = neurons;
 	}
-	layer_specifications.push_back(std::make_pair(neurons, act));
+	OneLayer layer;
+	layer.neurons = neurons;
+	layer.act = act;
+	layer.type = LayerType::DENSE;
+	layer.rate = rate;
+	layer_specifications.push_back(layer);
 	
+}
+void create_dropout(TrainingContext& tc, float rate) {
+	OneLayer layer;
+	layer.type = LayerType::DROPOUT;
+	layer.rate = rate;
+
+	layer_specifications.push_back(layer);
 }
 void build_network(TrainingContext& tc) {
 	tc.total_batch_count = static_cast<int>(std::ceil(tc.num_samples*1.0 / tc.batch_size));
 
+	int last_dense_size = 0;
 	// Naplnění TrainingContext vrstev
-	for (int i = 0; i < layer_specifications.size() - 1;i++) {
-		auto& first = layer_specifications[i];
-		auto& next = layer_specifications[i + 1];
-
-		tc.layers.push_back(createDenseLayer(first.first, next.first, next.second));
+	int current_size = tc.input_dim;
+	for (int i = 1; i < layer_specifications.size(); i++) {
+		auto& spec = layer_specifications[i];
+		if (spec.type == LayerType::DENSE) {
+			tc.layers.push_back(createDenseLayer(current_size, spec.neurons, spec.act));
+			current_size = spec.neurons;
+		}
+		else if (spec.type == LayerType::DROPOUT) {
+			// Uprav poslední vrstvu pokud se jedná o dropout
+			auto& prev = tc.layers.back();
+			prev.dropout_rate = spec.rate;
+		}
 	}
+	tc.output_dim = current_size;
 
 	// GPU ALOKACE
 	for (auto& layer : tc.layers) {
@@ -55,7 +76,7 @@ void build_network(TrainingContext& tc) {
 	cout << "Input: " << tc.input_dim << " neurons" << endl;
 	for (int i = 0; i < tc.layers.size(); i++) {
 		auto& layer = tc.layers[i];
-		cout << "Hidden layer " << i << ": " << layer.out << " neurons | activation: " << getActivationFunction(layer.activation) << endl;
+		cout << getLayerType(layer.type)<< " layer " << i << ": " << layer.out << " neurons | activation: " << getActivationFunction(layer.activation) << endl;
 	}
 }
 
@@ -90,23 +111,32 @@ void shuffle_indexes(std::vector<int> &indexes, int iteration) {
 	std::shuffle(indexes.begin(), indexes.end(), generator);
 }
 void handle_f1_calculation(TrainingContext& tc) {
-	float d_tp, d_fp, d_fn;
-	cudaMemcpy(&d_tp, tc.d_tp, sizeof(float), cudaMemcpyDeviceToHost);
-	cudaMemcpy(&d_fp, tc.d_fp, sizeof(float), cudaMemcpyDeviceToHost);
-	cudaMemcpy(&d_fn, tc.d_fn, sizeof(float), cudaMemcpyDeviceToHost);
+	float h_tp, h_fp, h_fn;
+	cudaMemcpy(&h_tp, tc.d_tp, sizeof(float), cudaMemcpyDeviceToHost);
+	cudaMemcpy(&h_fp, tc.d_fp, sizeof(float), cudaMemcpyDeviceToHost);
+	cudaMemcpy(&h_fn, tc.d_fn, sizeof(float), cudaMemcpyDeviceToHost);
+
+	cout << h_tp << " " << h_fp << " " << h_fn << endl;
 
 	// Vypočítání F1 score
-	float precision = d_tp / (d_tp + d_fp + 1e-7f);
-	float recall = d_tp / (d_tp + d_fn + 1e-7f);
+	float precision = h_tp / (h_tp + h_fp + 1e-7f);
+	float recall = h_tp / (h_tp + h_fn + 1e-7f);
 
-	float f1 = (2.0f * precision * recall) / (precision + recall + 1e-7f);
+	float f1 = 0.0;
+	// Pokud jsme predikovali jen 0 třídu
+	if ((h_tp + h_fp + h_fn) == 0) {
+		f1 = 1.0;
+	}
+	else {
+		f1 = (2.0f * precision * recall) / (precision + recall + 1e-7f);
+	}
 
 	tc.batch_f1.push_back(f1);
 }
 
 void train(TrainingContext& tc, bool enable_logging, bool enable_results) {
-	float* d_calculated_loss;
-	checkCudaErrors(cudaMalloc(&d_calculated_loss, sizeof(float)));
+	//float* d_calculated_loss;
+	//checkCudaErrors(cudaMalloc(&d_calculated_loss, sizeof(float)));
 
 
 	setNumSamplesConstant(tc.batch_size);
@@ -147,7 +177,7 @@ void train(TrainingContext& tc, bool enable_logging, bool enable_results) {
 		for (int batch_id = 0; batch_id < tc.total_batch_count; batch_id++) {
 
 			// Resetovani loss
-			checkCudaErrors(cudaMemset(d_calculated_loss, 0.0, sizeof(float)));
+			//checkCudaErrors(cudaMemset(d_calculated_loss, 0.0, sizeof(float)));
 			checkCudaErrors(cudaMemset(tc.d_accuracy, 0.0, sizeof(float)));
 			checkCudaErrors(cudaMemset(tc.d_tp, 0, sizeof(float)));
 			checkCudaErrors(cudaMemset(tc.d_fp, 0, sizeof(float)));
@@ -184,12 +214,23 @@ void train(TrainingContext& tc, bool enable_logging, bool enable_results) {
 
 void run_dataset1(TrainingContext& tc) {
 	tc.dataset = getDatasetByName("dataset1");
-	tc.n_of_iterations = 1000;
+	tc.n_of_iterations = 100;//1500;
 	tc.learning_rate = 0.1;
 	tc.batch_size = 2;
 
 	create_dense(tc, tc.dataset.dimensions, ActivationFunction::NONE, LayerLogicalType::INPUT);
 	create_dense(tc, 50, ActivationFunction::RELU, LayerLogicalType::OTHER);
+	create_dense(tc, 1, ActivationFunction::SIGMOID, LayerLogicalType::OUTPUT);
+}
+void run_dataset1_dropout(TrainingContext& tc) {
+	tc.dataset = getDatasetByName("dataset1");
+	tc.n_of_iterations = 100;
+	tc.learning_rate = 0.1;
+	tc.batch_size = 2;
+
+	create_dense(tc, tc.dataset.dimensions, ActivationFunction::NONE, LayerLogicalType::INPUT);
+	create_dense(tc, 50, ActivationFunction::RELU, LayerLogicalType::OTHER);
+	create_dropout(tc, 0.99);
 	create_dense(tc, 1, ActivationFunction::SIGMOID, LayerLogicalType::OUTPUT);
 }
 void run_dataset3(TrainingContext &tc) {
@@ -204,13 +245,26 @@ void run_dataset3(TrainingContext &tc) {
 	create_dense(tc, 1, ActivationFunction::SIGMOID, LayerLogicalType::OUTPUT);
 }
 void run_dataset4(TrainingContext& tc) {
-	tc.dataset = getDatasetByName("dataset3");
+	tc.dataset = getDatasetByName("dataset4");
 	tc.n_of_iterations = 1500;
 	tc.learning_rate = 0.001;
 	tc.batch_size = 128;
 
 	create_dense(tc, tc.dataset.dimensions, ActivationFunction::NONE, LayerLogicalType::INPUT);
 	create_dense(tc, 50, ActivationFunction::RELU, LayerLogicalType::OTHER);
+	create_dense(tc, 50, ActivationFunction::RELU, LayerLogicalType::OTHER);
+	create_dense(tc, 1, ActivationFunction::SIGMOID, LayerLogicalType::OUTPUT);
+}
+
+void run_dataset4_dropout(TrainingContext& tc) {
+	tc.dataset = getDatasetByName("dataset4");
+	tc.n_of_iterations = 5;
+	tc.learning_rate = 0.001;
+	tc.batch_size = 128;
+
+	create_dense(tc, tc.dataset.dimensions, ActivationFunction::NONE, LayerLogicalType::INPUT);
+	create_dense(tc, 50, ActivationFunction::RELU, LayerLogicalType::OTHER);
+	create_dropout(tc, 0.8);
 	create_dense(tc, 50, ActivationFunction::RELU, LayerLogicalType::OTHER);
 	create_dense(tc, 1, ActivationFunction::SIGMOID, LayerLogicalType::OUTPUT);
 }
@@ -233,7 +287,8 @@ int main(int argc, char* argv[])
 	tc.kernel_settings = kernel_settings;
 
 	// VYTVOR ARCHITEKTURU NEURONOVE SITE
-	run_dataset4(tc);
+	//run_dataset1(tc);
+	run_dataset1_dropout(tc);
 	tc.num_samples = tc.dataset.target.size();
 
 	build_network(tc);
@@ -242,7 +297,7 @@ int main(int argc, char* argv[])
 	allocate_input_data(tc);
 
 	// HLAVNI TRENOVACI SMYCKA
-	train(tc, false, false);
+	train(tc, false, true);
 
 	cout << "That is all ..." << endl;
 }

@@ -7,8 +7,6 @@ Dataset dataset1 = {
     {0, 1, 1, 0}
 };
 
-
-
 Dataset load_dataset(std::string name) {
     Dataset d;
 

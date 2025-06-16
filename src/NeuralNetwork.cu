@@ -6,7 +6,7 @@ using std::endl;
 __constant__ int num_samples;
 __constant__ float learning_rate;
 
-std::vector<std::pair<int, ActivationFunction>> layer_specifications;
+std::vector<OneLayer> layer_specifications;
 
 
 void setNumSamplesConstant(int input_size) {
@@ -33,6 +33,23 @@ __global__ void forward(const float* __restrict__ input_data, int input_size, co
 
 		output_data[sample_id * output_size + neuron_id] = activation_functions[activation_type](sum);
 
+	}
+}
+__global__ void dropout_forward(float* input, float* output, bool* mask, float dropout_rate, int size, curandState* curand_state) {
+	int sample_id = blockIdx.x * blockDim.x + threadIdx.x;
+	int neuron_id = blockIdx.y * blockDim.y + threadIdx.y;
+	
+	if (sample_id < num_samples && neuron_id < size) {
+		curand_init(1, sample_id * size + neuron_id, 0, &curand_state[sample_id * size + neuron_id]);
+
+		float random_val = curand_uniform(&curand_state[sample_id * size + neuron_id]);
+
+		mask[sample_id * size + neuron_id] = random_val > dropout_rate;
+
+		// Inverze dropout rate -- nutné pro inferenci
+		//output[idx] = mask[idx] ? input[idx] / (1.0f - dropout_rate) : 0.0f;
+
+		output[sample_id * size + neuron_id] = mask[sample_id * size + neuron_id] ? input[sample_id * size + neuron_id] : 0.0f;
 	}
 }
 
@@ -99,15 +116,16 @@ __global__ void compute_gradient(float* y_pred, float* y_true, float* gradient, 
 	}
 }
 __global__ void backward(float* activations, int input_size, float* weight_matrix, bool first, float* gradient_in
-	, float* gradient_out, int output_size, int next_out_size, int activation_type) {
+	, float* gradient_out, int output_size, int next_out_size, int activation_type, bool* dropout_mask, float dropout_rate) {
 
 	int sample_id = blockIdx.x * blockDim.x + threadIdx.x;
 	int neuron_id = blockIdx.y * blockDim.y + threadIdx.y;
 
 	if (sample_id < num_samples && neuron_id < output_size) {
-
+		float final_gradient;
 		if (first) {
-			gradient_out[sample_id * output_size + neuron_id] = gradient_in[sample_id * output_size + neuron_id] * derivate_activation_functions[activation_type](activations[sample_id * output_size + neuron_id]);
+			float g = gradient_in[sample_id * output_size + neuron_id];
+			final_gradient = g * derivate_activation_functions[activation_type](activations[sample_id * output_size + neuron_id]);
 		}
 		else {
 
@@ -116,11 +134,26 @@ __global__ void backward(float* activations, int input_size, float* weight_matri
 				sum += weight_matrix[j * output_size + neuron_id] * gradient_in[sample_id * next_out_size + j];
 			}
 
-			gradient_out[sample_id * output_size + neuron_id] = sum * derivate_activation_functions[activation_type](activations[sample_id * output_size + neuron_id]);
+			final_gradient = sum * derivate_activation_functions[activation_type](activations[sample_id * output_size + neuron_id]);
 
 		}
+
+		if (dropout_rate > 0.0f) {
+			final_gradient = dropout_mask[sample_id * output_size + neuron_id] ? final_gradient : 0.0f;
+		}
+
+		gradient_out[sample_id * output_size + neuron_id] = final_gradient;
 	}
 }
+__global__ void dropout_backward(float* gradient_in, float* gradient_out, int output_size, bool* mask) {
+	int sample_id = blockIdx.x * blockDim.x + threadIdx.x;
+	int neuron_id = blockIdx.y * blockDim.y + threadIdx.y;
+
+	if (sample_id < num_samples && neuron_id < output_size) {
+		gradient_out[sample_id * output_size + neuron_id] = mask[sample_id * output_size + neuron_id] ? gradient_in[sample_id * output_size + neuron_id] : 0.0f;
+	}
+}
+
 // Funkce pro aktualizaci vah a biasu
 // TODO:
 //      Pøepoèítat si zmìnu váhy pro N vzorkù a až potom volat tuhle funkci
@@ -176,9 +209,19 @@ void forward_phase(TrainingContext& tc, bool enable_logging, bool enable_results
 				tc.batch_size * current_layer.out, "%f ", "Before: ");
 		}
 
-		forward << <tc.kernel_settings.dimGrid, tc.kernel_settings.dimBlock >> > (current_input, current_layer.in, current_layer.weights,
-			current_layer.biases, current_layer.activations, current_layer.out, static_cast<int>(current_layer.activation));
+		if (current_layer.type == LayerType::DENSE) {
+			forward << <tc.kernel_settings.dimGrid, tc.kernel_settings.dimBlock >> > (current_input, current_layer.in, current_layer.weights,
+				current_layer.biases, current_layer.activations, current_layer.out, static_cast<int>(current_layer.activation));
+		}
+		if (current_layer.dropout_rate > 0.0f) {
+			cudaMalloc((void**)&tc.d_curand_state, tc.num_samples * current_layer.out * sizeof(curandState));
 
+			// Proveï inplace dropout
+			dropout_forward << <tc.kernel_settings.dimGrid, tc.kernel_settings.dimBlock >> > (current_layer.activations, current_layer.activations, 
+				current_layer.mask, current_layer.dropout_rate, current_layer.out, tc.d_curand_state);
+
+			cudaFree(tc.d_curand_state);
+		}
 
 		// Zmìna vstupu
 		current_input = current_layer.activations;
@@ -291,15 +334,17 @@ void backward_phase(TrainingContext& tc, bool enable_logging) {
 		}
 
 
-		if (i == tc.layers.size() - 1) {
-			backward << <tc.kernel_settings.dimGrid, tc.kernel_settings.dimBlock >> > (activation, in_size, weight_matrix, first, gradient_in, gradient_out,
-				out_size, 0, static_cast<int>(tc.layers[i].activation));
+		if (tc.layers[i].type == LayerType::DENSE) {
+			if (i == tc.layers.size() - 1) {
+				backward << <tc.kernel_settings.dimGrid, tc.kernel_settings.dimBlock >> > (activation, in_size, weight_matrix, first, gradient_in, gradient_out,
+					out_size, 0, static_cast<int>(tc.layers[i].activation), tc.layers[i].mask, tc.layers[i].dropout_rate);
+			}
+			else {
+				backward << <tc.kernel_settings.dimGrid, tc.kernel_settings.dimBlock >> > (activation, in_size, weight_matrix, first, gradient_in, gradient_out,
+					out_size, tc.layers[i + 1].out, static_cast<int>(tc.layers[i].activation), tc.layers[i].mask, tc.layers[i].dropout_rate);
+			}
 		}
-		else {
-			backward << <tc.kernel_settings.dimGrid, tc.kernel_settings.dimBlock >> > (activation, in_size, weight_matrix, first, gradient_in, gradient_out,
-				out_size, tc.layers[i + 1].out, static_cast<int>(tc.layers[i].activation));
-		}
-
+	
 
 		if (enable_logging) {
 			checkDeviceMatrix<float>(tc.layers[i].gradients, tc.batch_size * tc.layers[i].out * sizeof(float), 1, tc.batch_size * tc.layers[i].out, "%f ", "Gradient calc: ");
@@ -309,10 +354,12 @@ void backward_phase(TrainingContext& tc, bool enable_logging) {
 		// AKTUALIZACE VAH
 		float* input_activations = (i == 0) ? tc.d_input : tc.layers[i - 1].activations;
 
+		
 		update_parameters << <tc.kernel_settings.dimGrid, tc.kernel_settings.dimBlock >> > (input_activations, tc.layers[i].gradients, tc.layers[i].weights
-			, tc.layers[i].biases, tc.layers[i].in, tc.layers[i].out);
+				, tc.layers[i].biases, tc.layers[i].in, tc.layers[i].out);
+		
 
-
+		
 	}
 
 	if (enable_logging) {

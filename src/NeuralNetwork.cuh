@@ -4,6 +4,8 @@
 #include <random>
 #include <algorithm>
 #include <iostream>
+#include <curand_kernel.h>
+#include <tuple>
 
 #include "Datasets.cuh"
 #include "ActivationFunctions.cuh"
@@ -36,6 +38,8 @@ struct TrainingContext {
 	float* d_fp = nullptr;
 	float* d_fn = nullptr;
 
+	curandState* d_curand_state;
+
 	std::vector<float> batch_loss, batch_accuracy, batch_f1;
 
 	std::vector<Layer> layers;
@@ -43,8 +47,13 @@ struct TrainingContext {
 	KernelSettings kernel_settings;
 };
 
-
-extern std::vector<std::pair<int, ActivationFunction>> layer_specifications;
+struct OneLayer {
+	int neurons;
+	ActivationFunction act;
+	LayerType type;
+	float rate;
+};
+extern std::vector<OneLayer> layer_specifications;
 
 constexpr unsigned int THREADS_PER_BLOCK = 1028;
 
@@ -59,12 +68,16 @@ void setLearningRateConstant(float learning_rate);
 
 __global__ void forward(const float* __restrict__ input_data, int input_size, const float* __restrict__ weight_matrix, const float* __restrict__ bias, float* __restrict__ output_data, int output_size, int activation_type);
 
+__global__ void dropout_forward(float* input, float* output, bool* mask, float dropout_rate, int size, curandState* curand_state);
+
 __global__ void compute_loss(const float* __restrict__ y_predicted, const float* __restrict__ y_true, float* loss, const int size);
 
 __global__ void compute_gradient(float* y_pred, float* y_true, float* gradient, int size, float* accuracy, float* d_tp, float* d_fp, float* d_fn);
 
 __global__ void backward(float* activations, int input_size, float* weight_matrix, bool first, float* gradient_in
-	, float* gradient_out, int output_size, int next_out_size, int activation_type);
+	, float* gradient_out, int output_size, int next_out_size, int activation_type, bool* dropout_mask, float dropout_rate);
+
+__global__ void dropout_backward(float* gradient_in, float* gradient_out, int output_size, bool* mask);
 
 __global__ void update_parameters(float* input, float* gradient, float* weight_matrix, float* biases, int input_size, int output_size);
 

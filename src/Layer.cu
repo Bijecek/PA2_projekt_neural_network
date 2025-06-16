@@ -16,13 +16,18 @@ Layer createDenseLayer(int in_size, int out_size, ActivationFunction act) {
     return layer;
 }
 
-Layer createDropoutLayer(int size, float rate) {
+Layer createDropoutLayer(int in_size, int out_size, float rate) {
     Layer layer;
+
     layer.type = LayerType::DROPOUT;
     layer.activation = ActivationFunction::NONE;
-    layer.in = size;
-    layer.out = size;
+    layer.in = in_size;
+    layer.out = out_size;
     layer.dropout_rate = rate;
+    layer.activations = nullptr;
+    layer.mask = nullptr;
+    layer.weights = nullptr;
+    layer.biases = nullptr;
 
     return layer;
 }
@@ -50,10 +55,14 @@ void initLayer(Layer& layer, int input_size) {
         // Kopírování na GPU
         checkCudaErrors(cudaMemcpy(layer.weights, temporary_weights.data(), layer.in * layer.out * sizeof(float), cudaMemcpyHostToDevice));
         checkCudaErrors(cudaMemcpy(layer.biases, temporary_biases.data(), layer.out * sizeof(float), cudaMemcpyHostToDevice));
+
+        if (layer.dropout_rate > 0.0f) {
+            checkCudaErrors(cudaMalloc(&layer.mask, input_size * layer.out * sizeof(bool)));
+        }
     }
     else if(layer.type == LayerType::DROPOUT) {
-        checkCudaErrors(cudaMalloc(&layer.activations, input_size * layer.out * sizeof(float)));
-        checkCudaErrors(cudaMalloc(&layer.gradients, input_size * layer.out * sizeof(float)));
+        //checkCudaErrors(cudaMalloc(&layer.activations, input_size * layer.out * sizeof(float)));
+        //checkCudaErrors(cudaMalloc(&layer.gradients, input_size * layer.out * sizeof(float)));
         checkCudaErrors(cudaMalloc(&layer.mask, input_size * layer.out * sizeof(bool)));
     }
 }
@@ -65,6 +74,16 @@ std::string getActivationFunction(ActivationFunction af) {
         return "Sigmoid";
     case ActivationFunction::NONE:
         return "None";
+    default:
+        return "Unknown";
+    }
+}
+std::string getLayerType(LayerType type) {
+    switch (type) {
+    case LayerType::DENSE:
+        return "DENSE";
+    case LayerType::DROPOUT:
+        return "DROPOUT";
     default:
         return "Unknown";
     }
